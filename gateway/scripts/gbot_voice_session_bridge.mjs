@@ -14,6 +14,10 @@ import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:http';
 
 const BACKEND = 'https://api2.cursor.sh/aiserver.v1.GrokBotService/';
+// STACKCHAN_GBOT_NATIVE_DEBUG=1 logs the shape of every box event (no bodies).
+const NATIVE_DEBUG = process.env.STACKCHAN_GBOT_NATIVE_DEBUG === '1';
+// STACKCHAN_GBOT_RELAY_ALL_REPLIES=1 relays every new agent reply, not only ones tagged with this call.
+const RELAY_ALL_REPLIES = process.env.STACKCHAN_GBOT_RELAY_ALL_REPLIES === '1';
 export const RPC_ROUTES = Object.freeze({
   'GET /credential': 'MintSandVoiceCallSecret',
   'POST /session': 'VoiceCallHarnessSession',
@@ -51,7 +55,7 @@ function checksum(machineId) {
   return bytes.toString('base64url') + machineId;
 }
 
-async function accountRequest(method, body, { accountLoader = loadAccount, fetcher = fetch, signal, streaming = false } = {}) {
+export async function accountRequest(method, body, { accountLoader = loadAccount, fetcher = fetch, signal, streaming = false } = {}) {
   if (!Object.values(RPC_ROUTES).includes(method) && method !== 'EnsureSandBox' && method !== 'WatchGrokBotTranscripts') throw new Error('rpc_forbidden');
   if (method === 'EnsureSandBox' && ![JSON.stringify({wake: false, supportsAsleepBox: true}), '{}'].includes(JSON.stringify(body))) throw new Error('rpc_forbidden');
   if (method === 'WatchGrokBotTranscripts' && (!streaming || body.includeUnlistedAgents !== false || body.inlineBodyMaxBytes !== 65536 || body.cursors?.length !== 1 || typeof body.cursors[0].agentId !== 'string' || Object.keys(body.cursors[0]).some(k => !['agentId', 'generation', 'afterUpdatedSeq'].includes(k)) || body.cursors[0].generation !== 0 || body.cursors[0].afterUpdatedSeq !== '0')) throw new Error('rpc_forbidden');
@@ -202,9 +206,12 @@ export function filterTranscriptFrame(frame, context, state) {
     throw new Error('transcript_rebaseline_required');
   }
   const rows = frame.rows;
-  if (!state.connected || !rows || rows.agentId !== context.agentId || (rows.sessionId || '') !== context.sessionId || rows.replay === true || !Number.isSafeInteger(rows.generation)) return [];
-  if (state.generation !== null && rows.generation !== state.generation) throw new Error('transcript_rebaseline_required');
-  state.generation = rows.generation;
+  if (!state.connected || !rows || rows.agentId !== context.agentId || (rows.sessionId || '') !== context.sessionId || rows.replay === true) return [];
+  // Grok Bot 0.72.0 omits rows.generation; only enforce it when the server sends one.
+  if (Number.isSafeInteger(rows.generation)) {
+    if (state.generation !== null && rows.generation !== state.generation) throw new Error('transcript_rebaseline_required');
+    state.generation = rows.generation;
+  }
   const result = [];
   for (const row of rows.entries ?? []) {
     // No blob reads, omitted-body reads or history snapshots are performed.
@@ -215,6 +222,22 @@ export function filterTranscriptFrame(frame, context, state) {
     if (event) result.push(event);
   }
   return result;
+}
+
+// The same task result can arrive twice: as a box 'voice-call-nudge' outcome and as
+// the agent's transcript reply (seen with Grok Bot 0.72.0, 22 ms apart). Identical text
+// inside this window is one result; outside it, equal text may be a separate task.
+const DUPLICATE_UPDATE_WINDOW_MS = 15000;
+// Only a copy from the *other* source counts: two box outcomes with equal text are
+// still two results, as upstream's tests require.
+function isRecentDuplicate(context, text, source, nowMs = Date.now()) {
+  if (!(context.recentUpdates instanceof Map)) context.recentUpdates = new Map();
+  const recent = context.recentUpdates;
+  for (const [key, seen] of recent) if (nowMs - seen.at > DUPLICATE_UPDATE_WINDOW_MS) recent.delete(key);
+  const seen = recent.get(text);
+  if (seen && seen.source !== source) return true;
+  recent.set(text, {at: nowMs, source});
+  return false;
 }
 
 export function filterNativeEvent(event, context) {
@@ -232,7 +255,9 @@ export function filterNativeEvent(event, context) {
       if (context.seen.has(key)) return null;
       context.seen.add(key);
     }
-    return {channel: 'voice-call-nudge', payload: {agentId: p.agentId, callId: p.callId, kind: p.kind, update: p.update.slice(0, 16000)}};
+    const update = p.update.slice(0, 16000);
+    if (p.kind === 'outcome' && isRecentDuplicate(context, update, 'box', context.nowMs)) return null;
+    return {channel: 'voice-call-nudge', payload: {agentId: p.agentId, callId: p.callId, kind: p.kind, update}};
   }
   if (event.channel !== 'transcript' || p.type !== 'appended') return null;
   // Ordered replica keys are the authoritative agent/session scope in 0.71.2.
@@ -240,6 +265,26 @@ export function filterNativeEvent(event, context) {
   const expected = 'transcript:' + context.agentId + (context.sessionId ? '\0' + context.sessionId : '');
   if (replica !== expected || !Number.isSafeInteger(p.ordered?.sequence)) return null;
   const entry = p.entry;
+  // Agent replies (send-message entries). The 0.71.2 harness delivered task results as
+  // box 'voice-call-nudge' outcomes; with Grok Bot 0.72.0 none arrive, while the agent's
+  // reply does land in its transcript. Relay it as an outcome so the voice session reads
+  // it out. A reply whose channel names this call is always relayed; other replies only
+  // with STACKCHAN_GBOT_RELAY_ALL_REPLIES=1 (a dedicated agent shared with nobody else).
+  if (entry && entry.kind === 'send-message' && entry.message && typeof entry.message === 'object') {
+    const text = typeof entry.message.content === 'string' ? entry.message.content : '';
+    const channel = typeof entry.message.channel === 'string' ? entry.message.channel : '';
+    const callMatch = Boolean(context.callId) && channel.includes(context.callId);
+    const fresh = Number.isFinite(entry.timestampMs) && entry.timestampMs >= context.sinceMs;
+    if (NATIVE_DEBUG) console.log(JSON.stringify({event: 'gbot_native_stream', source: 'typed', state: 'agent_reply', channel_prefix: channel.slice(0, 12), channel_len: channel.length, call_match: callMatch, fresh, text_len: text.length}));
+    if (!fresh || !text.trim() || typeof entry.id !== 'string' || !entry.id) return null;
+    if (!callMatch && !RELAY_ALL_REPLIES) return null;
+    const key = 'reply:' + entry.id;
+    if (context.seen.has(key)) return null;
+    context.seen.add(key);
+    const update = text.slice(0, 16000);
+    if (isRecentDuplicate(context, update, 'transcript', context.nowMs)) return null;
+    return {channel: 'voice-call-nudge', payload: {agentId: context.agentId, callId: context.callId, kind: 'outcome', update}};
+  }
   if (!entry || entry.kind !== 'message' || entry.role !== 'user' || typeof entry.id !== 'string' || !entry.id || typeof entry.content !== 'string') return null;
   if ('channel' in entry || 'fromAgent' in entry || 'channelSender' in entry || 'fromUser' in entry || entry.author?.kind !== 'cursor_user' || entry.author.id !== context.authId) return null;
   // No baseline/snapshot is ever forwarded. Timestamp bounds also reject replay
@@ -354,6 +399,16 @@ export function createBridge({ port = 18771, rpc = accountRpc, agentId = process
               const parsed = JSON.parse(data);
               const id = block.split('\n').find(line => line.startsWith('id:'))?.slice(3).trim();
               event = filterNativeEvent(id ? {...parsed, eventId: id} : parsed, context);
+              if (NATIVE_DEBUG) {
+                // Shape only, never bodies: enough to see why an event was dropped.
+                const p = parsed?.payload && typeof parsed.payload === 'object' ? parsed.payload : {};
+                logStream('box', 'event', {
+                  channel: parsed?.channel ?? null, kind: p.kind ?? p.type ?? null,
+                  agent_match: p.agentId === undefined ? null : p.agentId === context.agentId,
+                  call_match: p.callId === undefined ? null : p.callId === context.callId,
+                  accepted: Boolean(event), has_update: typeof p.update === 'string',
+                });
+              }
             } catch { continue; }
             if (event?.channel === 'typed-message') event = null;
             if (event && !res.write('data: ' + JSON.stringify(event) + '\n\n')) throw new Error('slow_consumer');

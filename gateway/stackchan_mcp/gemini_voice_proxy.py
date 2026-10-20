@@ -50,6 +50,16 @@ from .wake_gate import LISTENING_LED_RGB, WakeGate, create_wake_gate_from_env
 logger = logging.getLogger(__name__)
 
 
+def device_stt_message(text: str) -> dict[str, Any]:
+    """xiaozhi ``stt``: the user's words for the device subtitle."""
+    return {"type": "stt", "text": text}
+
+
+def device_sentence_message(text: str) -> dict[str, Any]:
+    """xiaozhi ``tts.sentence_start`` carrying the assistant's words."""
+    return {"type": "tts", "state": "sentence_start", "text": text}
+
+
 SendToDevice = Callable[[str | bytes], Awaitable[None]]
 
 
@@ -289,6 +299,7 @@ class GeminiVoiceProxy:
         self._send_to_device = send_to_device
         self._device_hello = device_hello
         self._stopped = False
+        self._close_device_when_tts_ends = False
 
         api_key = self._voice_api_key()
         if self._voice_requires_key() and not api_key:
@@ -655,21 +666,47 @@ class GeminiVoiceProxy:
             await self._set_leds_safe(*DEAD_LED_RGB)
         except Exception:
             logger.exception("session-dead red LED failed")
+        # Without a voice session the device cannot be served: hand it back to idle
+        # so its on-device wake word is re-armed for the next attempt.
+        self._close_device_when_tts_ends = True
+        await self._close_device_if_requested()
 
     async def _handle_bridge_end_conversation(self) -> None:
-        """Close the wake window when Gemini explicitly ends the conversation."""
+        """Close the wake window when the model explicitly ends the conversation."""
+        # Upstream xiaozhi-esp32 firmware stays in "listening" until its audio
+        # channel closes, and only re-arms the on-device wake word when idle. End
+        # the conversation the way the xiaozhi cloud does: close the socket, after
+        # any goodbye that is still playing. This runs even without a gateway-side
+        # wake gate (STACKCHAN_WAKE_WORD=0, device-side wake word).
+        self._close_device_when_tts_ends = True
         gate = self._wake_gate
-        if gate is None:
+        if gate is not None:
+            closed = gate.close()
+            if closed:
+                self._status.on_wake_closed()
+                bridge = self._bridge
+                if bridge is not None:
+                    await self._signal_manual_vad_end(bridge)
+                if not self._tts_active:
+                    await self._set_leds_safe(0, 0, 0)
+                    await self._send_device_emotion_safe(IDLE_EMOTION)
+        if not self._tts_active:
+            await self._close_device_if_requested()
+
+    _close_device_when_tts_ends = False
+
+    async def _close_device_if_requested(self) -> None:
+        if not self._close_device_when_tts_ends:
             return
-        closed = gate.close()
-        if closed:
-            self._status.on_wake_closed()
-            bridge = self._bridge
-            if bridge is not None:
-                await self._signal_manual_vad_end(bridge)
-            if not self._tts_active:
-                await self._set_leds_safe(0, 0, 0)
-                await self._send_device_emotion_safe(IDLE_EMOTION)
+        self._close_device_when_tts_ends = False
+        close = getattr(self, "close_device", None)
+        if close is None:
+            return
+        try:
+            await close()
+            logger.info("device socket closed at end of conversation")
+        except Exception as exc:
+            logger.debug("device close failed: %s", exc)
 
     async def try_handle_device_mcp(self, message: dict[str, Any]) -> bool:
         """Device MCP responses go back to the gateway, not to us.
@@ -791,6 +828,24 @@ class GeminiVoiceProxy:
         self._tts_tasks.add(task)
         task.add_done_callback(self._on_tts_task_done)
 
+    async def _send_device_json(self, message: dict[str, Any], what: str) -> None:
+        """Best-effort control message to the device (subtitles, states)."""
+        if self._send_to_device is None or self._stopped:
+            return
+        try:
+            async with self._send_lock:
+                await self._send_to_device(json.dumps(message, ensure_ascii=False))
+        except Exception as exc:
+            logger.debug("%s to device failed: %s", what, exc)
+
+    async def _handle_user_transcript(self, text: str) -> None:
+        """What the user said, as a xiaozhi ``stt`` message: the firmware shows it as
+        the user's subtitle, like the xiaozhi cloud does."""
+        if not text:
+            return
+        logger.info("user transcript: %s", text)
+        await self._send_device_json(device_stt_message(text), "stt")
+
     async def _log_gemini_transcript(self, text: str) -> None:
         """Default on_text in AUDIO mode: log the transcript, do not synthesize.
 
@@ -804,6 +859,9 @@ class GeminiVoiceProxy:
         if text:
             logger.info("gemini transcript: %s", text)
             self._status.record_transcript(text)
+            # The model's words as the assistant subtitle. ``_begin_tts`` only
+            # sends an empty sentence_start; the transcript lands a moment later.
+            await self._send_device_json(device_sentence_message(text), "tts.sentence_start")
 
     def _on_tts_task_done(self, task: asyncio.Task[None]) -> None:
         self._tts_tasks.discard(task)
@@ -1294,6 +1352,7 @@ class GeminiVoiceProxy:
             self._tts_active = False
             self._status.on_tts_state(False)
             self._prebuffer_satisfied = False
+            await self._close_device_if_requested()
             self._pcm_prebuffer.clear()
             self._signal_speaking_avatar("idle")
             self._signal_speaking_leds(*self._post_tts_led_rgb())
@@ -1332,6 +1391,8 @@ class GeminiVoiceProxy:
             except Exception as exc:
                 logger.debug("abort tts.stop drop: %s", exc)
             self._signal_speaking_leds(*self._post_tts_led_rgb())
+        # A goodbye cut short by the line dropping still ends the conversation.
+        await self._close_device_if_requested()
         self._clear_turn_emotion_face()
 
     def _post_tts_led_rgb(self) -> tuple[int, int, int]:

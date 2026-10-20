@@ -168,3 +168,35 @@ test('HTTP: typed EOF or error reconnects independently and box results still ar
     } finally {await reader?.cancel();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
   }
 });
+
+test('agent transcript replies relay as call outcomes only when tagged with the call, fresh and new', async () => {
+  const {filterNativeEvent, filterTranscriptFrame} = await import('./gbot_voice_session_bridge.mjs');
+  const context = {agentId:'a',callId:'call-c',sessionId:'',authId:'owner',sinceMs:100,seen:new Set()};
+  const reply = {id:'r1',kind:'send-message',message:{type:'text',content:'FAKE RESULT',channel:'voice:call-c'},timestampMs:150,requestId:'req'};
+  const wrap = entry => ({channel:'transcript',payload:{type:'appended',entry,ordered:{replicaKey:'transcript:a',sequence:1}}});
+  const relayed = filterNativeEvent(wrap(reply), context);
+  assert.deepEqual(relayed, {channel:'voice-call-nudge',payload:{agentId:'a',callId:'call-c',kind:'outcome',update:'FAKE RESULT'}});
+  assert.equal(filterNativeEvent(wrap(reply), context), null, 'same entry id is not relayed twice');
+  assert.equal(filterNativeEvent(wrap({...reply,id:'r2',timestampMs:99}), context), null, 'older than the call');
+  assert.equal(filterNativeEvent(wrap({...reply,id:'r3',message:{...reply.message,channel:'voice:other'}}), context), null, 'another call');
+  assert.equal(filterNativeEvent(wrap({...reply,id:'r4',message:{...reply.message,content:'   '}}), context), null, 'blank');
+  // Frames without rows.generation (Grok Bot 0.72.0) still deliver entries.
+  const state = {connected:false,sinceMs:100,generation:null};
+  filterTranscriptFrame({connected:{serverTimeMs:'100'}}, context, state);
+  const row = {body: Buffer.from(JSON.stringify({...reply,id:'r5'})).toString('base64')};
+  assert.equal(filterTranscriptFrame({rows:{agentId:'a',replay:false,entries:[row]}}, context, state).length, 1);
+});
+
+test('the same result from the box nudge and the transcript reply is relayed once within 15 s', async () => {
+  const {filterNativeEvent} = await import('./gbot_voice_session_bridge.mjs');
+  const context = {agentId:'a',callId:'call-c',sessionId:'',authId:'owner',sinceMs:100,seen:new Set(),nowMs:1000000};
+  const nudge = {channel:'voice-call-nudge',payload:{agentId:'a',callId:'call-c',kind:'outcome',update:'SAME RESULT'}};
+  const reply = {channel:'transcript',payload:{type:'appended',entry:{id:'r9',kind:'send-message',message:{type:'text',content:'SAME RESULT',channel:'voice:call-c'},timestampMs:150},ordered:{replicaKey:'transcript:a',sequence:1}}};
+  assert.equal(filterNativeEvent(nudge, context).payload.update, 'SAME RESULT');
+  assert.equal(filterNativeEvent(reply, context), null, 'transcript copy 0 ms later is a duplicate');
+  context.nowMs += 20000;
+  assert.equal(filterNativeEvent({...reply,payload:{...reply.payload,entry:{...reply.payload.entry,id:'r10'}}}, context).payload.update, 'SAME RESULT', 'after the window equal text is a new result');
+  const other = {...nudge,payload:{...nudge.payload,update:'OTHER'}};
+  assert.equal(filterNativeEvent(other, context).payload.update, 'OTHER');
+  assert.equal(filterNativeEvent(other, context).payload.update, 'OTHER', 'two box outcomes with equal text stay two results');
+});

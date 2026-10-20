@@ -122,6 +122,9 @@ class TouchEventBridge:
             return None
         if not getattr(self._esp32, "device_connected", False):
             return None
+        has_tool = getattr(self._esp32, "has_tool", None)
+        if callable(has_tool) and not has_tool(TOUCH_TOOL_NAME):
+            return None  # upstream xiaozhi-esp32 boards: no touch tool, nothing to poll
 
         try:
             result, error = await self._esp32.call_tool(TOUCH_TOOL_NAME, {})

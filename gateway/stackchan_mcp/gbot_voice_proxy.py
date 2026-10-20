@@ -28,6 +28,7 @@ class GbotVoiceProxy(GeminiVoiceProxy):
         return "native"
 
     def _make_bridge(self, esp32, **kwargs):
+        kwargs.setdefault("on_user_text", self._handle_user_transcript)
         return (self.bridge_factory or GbotVoiceBridge)(
             esp32=esp32,
             tool_executor=self.voice_tool_executor,

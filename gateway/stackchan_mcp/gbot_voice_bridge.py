@@ -117,6 +117,7 @@ class GbotVoiceBridge:
         api_key=None,
         response_modality=None,
         on_text=None,
+        on_user_text=None,
         on_end_conversation=None,
         usb_transport=None,
         on_head_command=None,
@@ -142,6 +143,7 @@ class GbotVoiceBridge:
         self.call_id = str(uuid.uuid4())
         self._on_transcript = on_transcript
         self._on_text = on_text
+        self._on_user_text = on_user_text
         self._on_end_conversation = on_end_conversation
         self._executor = tool_executor
         self._executor_factory = tool_executor_factory
@@ -807,6 +809,8 @@ class GbotVoiceBridge:
             if kind == "conversation.item.input_audio_transcription.completed":
                 if self._executor:
                     await self._executor.observe_user_input(text, finished=True)
+                if self._on_user_text and text:
+                    await self._on_user_text(text)
             elif self._on_text and text:
                 await self._on_text(text)
         elif kind == "response.done":

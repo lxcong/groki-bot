@@ -30,6 +30,25 @@ Gemini ask_grokbot → optional localhost:18770 → gbot CLI → Grok Bot
 
 设备侧：进入固件的配网页面，「高级」标签里把「自定义 OTA 地址」改成
 `http://<本机局域网 IP>:8766/xiaozhi/ota/`，保存后重启；改回原地址即可回到原来的服务器。
+（小乐固件把这个地址编译成了默认值，配网页面留空即可。）
+
+对上游固件补齐的小智协议细节（2026-10-20 在小乐板上验证）：
+- 用户说的话以 `stt` 发给设备，模型回复的文字随 `tts sentence_start` 发送，设备两边都显示字幕。
+- 模型挂断（`end_the_call` / `end_conversation`）、8 秒无人说话或语音会话失效时，网关在再见语音播完后
+  关闭设备的 WebSocket；上游固件只有在音频通道关闭后才回到待机并重新开启设备端唤醒词。
+- 设备在 `tools/list` 里没有的工具（触摸轮询、舵机、灯光）不再调用，避免设备日志刷 Unknown tool。
+
+### Grok Bot 0.72.0 登录态语音的实测说明
+
+- 登录桥必须在**你自己的终端**里启动：它用 `security` 读钥匙串里的「Grok Bot Safe Storage」，
+  第一次会弹授权窗，选「始终允许」；从沙箱或后台服务启动拿不到授权，`/credential` 会一直 502。
+- `gbot bots list` 在 0.72.0 上读不到应用会话（agent 清单在云端）。agent ID 可以在 Grok Bot Shell 里
+  `ls /home/box/agent-data/agents` 看到，每个目录一个 agent，`profile.json` 里有名字。
+- 任务结果回传：0.71.2 通过云端 `voice-call-nudge` outcome 事件；0.72.0 下这条事件不稳定，登录桥改为
+  同时监听 agent 对话记录，把标有本次通话（`message.channel` = `voice:<callId>`）的新回复作为结果转发，
+  两条来源 15 秒内的同一段文字只转发一次。`STACKCHAN_GBOT_RELAY_ALL_REPLIES=1` 可转发该 agent 的所有新回复。
+- `STACKCHAN_GBOT_NATIVE_DEBUG=1` 让登录桥打印每条云端事件的形状（不含正文），用于排查过滤原因。
+- 语音通话里的任务和回复带 `voice:` 频道标记，Grok Bot 桌面应用的普通聊天界面不显示它们。
 
 ## 需不需要装网关
 

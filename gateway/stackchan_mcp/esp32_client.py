@@ -154,6 +154,23 @@ class ESP32Connection:
         logger.info("Discovered %d tools on ESP32", len(all_tools))
         return all_tools
 
+    def has_tool(self, name: str) -> bool:
+        """Whether the device offered ``name`` in tools/list (True while the list is unknown)."""
+        if not self.tools:
+            return True
+        return any(t.get("name") == name for t in self.tools)
+
+    async def close_ws(self, reason: str = "conversation ended") -> None:
+        """Close the device WebSocket. Upstream xiaozhi-esp32 firmware treats a
+        closed audio channel as the end of the conversation: it returns to idle
+        and re-arms its on-device wake word, exactly as the xiaozhi cloud does."""
+        if not self._connected:
+            return
+        try:
+            await self._ws.close(code=1000, reason=reason[:120])
+        except Exception as exc:  # pragma: no cover - transport specific
+            logger.debug("device close failed: %s", exc)
+
     async def call_tool(
         self, name: str, arguments: dict[str, Any]
     ) -> tuple[Any, dict[str, Any] | None]:
@@ -527,6 +544,9 @@ class ESP32Manager:
 
                     if cloud_proxy is not None:
                         cloud_info = CloudConnectionInfo.from_headers(request_headers)
+                        # Lets the voice proxy end the conversation the way the
+                        # xiaozhi cloud does: by closing the device's socket.
+                        cloud_proxy.close_device = connection.close_ws
                         await cloud_proxy.start(cloud_info, data, ws.send)
 
                     # Send hello response only after the cloud socket has had a
@@ -737,6 +757,10 @@ class ESP32Manager:
             }
         if not self._connection.initialized:
             return None, {"code": -32000, "message": "ESP32 not initialized"}
+        if not self._connection.has_tool(name):
+            # Upstream xiaozhi-esp32 boards have no touch/head/LED tools; asking
+            # anyway only fills the device log with "Unknown tool" errors.
+            return None, {"code": -32601, "message": f"tool {name} not offered by device"}
         if notify_activity and self.on_activity is not None:
             self.on_activity()
         if (
@@ -746,6 +770,11 @@ class ESP32Manager:
         ):
             self.on_head_command()
         return await self._connection.call_tool(name, arguments)
+
+    def has_tool(self, name: str) -> bool:
+        """Whether the connected device offered ``name`` in tools/list."""
+        connection = self._connection
+        return bool(connection) and connection.has_tool(name)
 
     async def send_emotion(
         self,
