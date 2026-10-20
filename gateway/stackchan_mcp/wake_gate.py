@@ -411,6 +411,9 @@ def pcm_rms_int16(pcm: bytes) -> float:
     return math.sqrt(total / sample_count)
 
 
+_disabled_logged = False
+
+
 def create_wake_gate_from_env(
     *,
     kws: KeywordSpotter | None = None,
@@ -418,7 +421,11 @@ def create_wake_gate_from_env(
 ) -> WakeGate | None:
     """Create the production wake gate; None means pass-through mode."""
     if _env_disabled("STACKCHAN_WAKE_WORD"):
-        logger.info("wake word gate disabled by STACKCHAN_WAKE_WORD=0")
+        global _disabled_logged
+        if not _disabled_logged:
+            # The proxy asks for a gate on every device frame; say this once.
+            logger.info("wake word gate disabled by STACKCHAN_WAKE_WORD=0")
+            _disabled_logged = True
         return None
     try:
         spotter = kws or SherpaOnnxKeywordSpotter(

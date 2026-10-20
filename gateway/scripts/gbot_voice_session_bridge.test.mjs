@@ -200,3 +200,32 @@ test('the same result from the box nudge and the transcript reply is relayed onc
   assert.equal(filterNativeEvent(other, context).payload.update, 'OTHER');
   assert.equal(filterNativeEvent(other, context).payload.update, 'OTHER', 'two box outcomes with equal text stay two results');
 });
+
+test('a new call takes over a stale active call that has no event stream, but not a live one', async () => {
+  const port = await freePort(); const presences=[]; let reader;
+  const sandbox={callerAuthId:async()=> 'owner', presence:async(body)=>{presences.push([body.callId, body.isOnTheLine]);},
+    openEvents: async signal => new Response(new ReadableStream({start(controller) { signal.addEventListener('abort', () => controller.close(), {once:true}); }}), {headers:{'content-type':'text/event-stream'}})};
+  const transcript={async *events(_context, signal) { await new Promise(resolve => signal.addEventListener('abort', resolve, {once:true})); }};
+  const server=createBridge({port,agentId:'a',desktopEnabled:true,toolsEnabled:false,sandbox,transcript,rpc:async()=>({kind:1}),nativeLog:()=>{}});
+  await new Promise(r=>server.listen(port,'127.0.0.1',r));
+  const post=async(path,body)=>fetch(`http://127.0.0.1:${port}`+path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  try {
+    assert.equal((await post('/native/presence',{agentId:'a',callId:'call-old',isOnTheLine:true,acceptsOverheard:false})).status,200);
+    // Going off the line for a different call never touches the active one.
+    assert.equal((await post('/native/presence',{agentId:'a',callId:'call-new',isOnTheLine:false,acceptsOverheard:false})).status,409);
+    // No event stream was ever attached to call-old: the owner is gone, so call-new takes over.
+    assert.equal((await post('/native/presence',{agentId:'a',callId:'call-new',isOnTheLine:true,acceptsOverheard:false})).status,200);
+    assert.deepEqual(presences,[['call-old',true],['call-old',false],['call-new',true]]);
+    const tool={agentId:'a',callId:'call-new',name:'send_task',input:{request:'FAKE'},line:{theyJustTalked:false,newsOwed:false,receiptOwed:false,alreadySpokeThisTurn:false}};
+    assert.equal((await post('/tool',tool)).status,200);
+    assert.equal((await post('/tool',{...tool,callId:'call-old'})).status,403);
+    // With a live event stream the owner is alive: another call must still wait.
+    const response=await fetch(`http://127.0.0.1:${port}/native/events?agentId=a&callId=call-new`);
+    reader=response.body.getReader(); await reader.read();
+    assert.equal((await post('/native/presence',{agentId:'a',callId:'call-x',isOnTheLine:true,acceptsOverheard:false})).status,409);
+    await reader.cancel(); reader=null;
+    await new Promise(resolve=>setTimeout(resolve,20));
+    assert.equal((await post('/native/presence',{agentId:'a',callId:'call-x',isOnTheLine:true,acceptsOverheard:false})).status,200);
+  } finally {await reader?.cancel();server.closeAllConnections();await new Promise(r=>server.close(r));}
+});
+

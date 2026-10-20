@@ -451,10 +451,18 @@ export function createBridge({ port = 18771, rpc = accountRpc, agentId = process
       if (nativePresence) {
         if (presenceBusy) return send(409, {ok: false, error: 'presence_busy'});
         if (!activeCall && !body.isOnTheLine) return send(403, {ok: false, error: 'call_not_allowed'});
-        if (activeCall && body.callId !== activeCall.callId) return send(409, {ok: false, error: 'call_conflict'});
+        // A call whose owner died without going off the line (gateway restart) keeps no
+        // event stream; a new call may take it over. A call with a live stream is kept.
+        const stale = activeCall && body.callId !== activeCall.callId && body.isOnTheLine && [...streams].every(c => c.signal.aborted) ? activeCall : null;
+        if (activeCall && body.callId !== activeCall.callId && !stale) return send(409, {ok: false, error: 'call_conflict'});
         presenceBusy = true;
         try {
         const authId = await sandbox.callerAuthId();
+        if (stale) {
+          logStream('box', 'stale_call_replaced', {http_status: null, error_class: null});
+          await sandbox.presence({agentId, callId: stale.callId, isOnTheLine: false, acceptsOverheard: false});
+          activeCall = null; for (const controller of streams) controller.abort();
+        }
         await sandbox.presence(body);
         if (body.isOnTheLine) {
           if (!activeCall) activeCall = {agentId, callId: body.callId, acceptsOverheard: body.acceptsOverheard, sessionId, authId, sinceMs: Date.now(), seen: new Set()};

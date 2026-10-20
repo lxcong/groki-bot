@@ -20,6 +20,7 @@ This module owns no audio I/O — it sits between ``esp32_client``
 
 from __future__ import annotations
 
+import array
 import asyncio
 import inspect
 import json
@@ -125,6 +126,10 @@ class GeminiVoiceProxy:
     _wake_gate: WakeGate | None = None
     _wake_gate_failures: int = 0
     _wake_gate_permanently_failed: bool = False
+    _level_sum_sq: int = 0
+    _level_count: int = 0
+    _level_peak: int = 0
+    _level_logged_at: float = 0.0
     _wake_gate_next_rebuild_at: float = 0.0
     _wake_gate_rebuild_max: int = 3
     _keepalive: SessionKeepalive | None = None
@@ -533,12 +538,44 @@ class GeminiVoiceProxy:
         pcm = self._codec.decode_device_frame(data)
         if not pcm:
             return False
+        self._note_device_level(pcm)
         try:
             await self._forward_gated_device_pcm(pcm)
             return True
         except Exception as exc:
             logger.warning("Gemini send_audio failed: %s", exc)
             return False
+
+    def _note_device_level(self, pcm: bytes) -> None:
+        """Log the microphone level every few seconds (diagnoses a silent device)."""
+        dump = os.environ.get("STACKCHAN_MIC_DUMP", "")
+        if dump:
+            # Raw 16 kHz mono s16le, appended; convert with sox/ffmpeg or a WAV header.
+            try:
+                with open(dump, "ab") as fh:
+                    fh.write(pcm)
+            except OSError:
+                pass
+        samples = array.array("h")
+        samples.frombytes(pcm[: len(pcm) // 2 * 2])
+        if not samples:
+            return
+        self._level_sum_sq += sum(v * v for v in samples)
+        self._level_count += len(samples)
+        self._level_peak = max(self._level_peak, max(abs(v) for v in samples))
+        now = time.monotonic()
+        if now - self._level_logged_at < 3.0:
+            return
+        rms = math.sqrt(self._level_sum_sq / max(1, self._level_count))
+        dbfs = 20 * math.log10(max(rms, 1e-9) / 32768.0)
+        logger.info(
+            "device mic level: rms=%.1f dBFS peak=%d over %d samples",
+            dbfs, self._level_peak, self._level_count,
+        )
+        self._level_sum_sq = 0
+        self._level_count = 0
+        self._level_peak = 0
+        self._level_logged_at = now
 
     def _configure_wake_gate(self, gate: WakeGate | None) -> None:
         if gate is not None:
