@@ -17,6 +17,20 @@ Grok voice → localhost:18771 login helper → native Grok Bot
 Gemini ask_grokbot → optional localhost:18770 → gbot CLI → Grok Bot
 ```
 
+## 接入上游 xiaozhi-esp32 固件（小乐）
+
+上游 xiaozhi-esp32 固件（例如小乐板型）不走蓝牙设置页，它在每次开机时向 OTA 地址 POST 系统信息，
+并从响应里的 `websocket` 段拿到服务器地址。本网关在 8766 端口提供 `/xiaozhi/ota/`：
+
+- 响应只含 `websocket`（`url` 为 `ws://<设备访问的主机>:WS_PORT/`，设置了 `STACKCHAN_TOKEN` 时附带 `token`）、
+  `server_time` 和把设备自身版本原样返回的 `firmware`，不会触发升级，也不含 `mqtt` 段（固件见到 `mqtt` 会改走 MQTT）。
+- 主机地址来自设备请求的 Host 头；需要固定时设 `STACKCHAN_OTA_WS_URL=ws://192.168.1.20:8765/`。
+- 设备端的唤醒词（如 MultiNet「小乐」）会以 `listen detect` 通知网关，网关端的「Hi Grok」门可以用
+  `STACKCHAN_WAKE_WORD=0` 关掉。
+
+设备侧：进入固件的配网页面，「高级」标签里把「自定义 OTA 地址」改成
+`http://<本机局域网 IP>:8766/xiaozhi/ota/`，保存后重启；改回原地址即可回到原来的服务器。
+
 ## 需不需要装网关
 
 Groki Bot 固件自己就能对话：刷好固件，在设置页填上自己的 OpenAI 或 Gemini 密钥，不接电脑也能说话。以下情况再装网关：

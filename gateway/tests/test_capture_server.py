@@ -1,5 +1,7 @@
 """Tests for HTTP capture upload helpers."""
 
+import json
+
 import pytest
 
 from stackchan_mcp.capture_server import (
@@ -73,3 +75,74 @@ async def test_inject_text_reuses_capture_bearer_token():
     response = await handle_inject_text(FakeJsonRequest(app, {"text": "测试"}))
 
     assert response.status == 401
+
+
+class FakeOtaRequest:
+    """Enough of aiohttp's Request for handle_xiaozhi_ota."""
+
+    def __init__(self, app, *, method="POST", body=None, host="192.168.10.20:8766", headers=None):
+        self.app = app
+        self.method = method
+        self._body = body
+        self.host = host
+        self.headers = headers or {}
+        self.can_read_body = body is not None
+
+    async def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_xiaozhi_ota_points_device_at_this_gateway():
+    """The reply carries only a websocket section, built from the host the device called."""
+    from stackchan_mcp.capture_server import handle_xiaozhi_ota
+
+    app = create_capture_app(ota_ws_port=8765, ota_token="secret")
+    request = FakeOtaRequest(
+        app,
+        body={"application": {"version": "2.5.3"}, "board": {"type": "esp32-s3-touch-amoled-1.75c-xiaole"}},
+        headers={"Device-Id": "7c:0c:5f:42:41:6c"},
+    )
+    response = await handle_xiaozhi_ota(request)
+
+    assert response.status == 200
+    payload = json.loads(response.text)
+    assert payload["websocket"] == {"url": "ws://192.168.10.20:8765/", "token": "secret"}
+    assert payload["firmware"] == {"version": "2.5.3", "url": ""}
+    assert "mqtt" not in payload and "activation" not in payload
+    assert payload["server_time"]["timestamp"] > 1_700_000_000_000
+    assert isinstance(payload["server_time"]["timezone_offset"], int)
+
+
+@pytest.mark.asyncio
+async def test_xiaozhi_ota_get_without_body_and_url_override():
+    """GET (no body) still answers; STACKCHAN_OTA_WS_URL wins over the derived URL; no token key when unset."""
+    from stackchan_mcp.capture_server import handle_xiaozhi_ota
+
+    app = create_capture_app(ota_ws_url="ws://robot-pc.local:9000/")
+    response = await handle_xiaozhi_ota(FakeOtaRequest(app, method="GET"))
+
+    payload = json.loads(response.text)
+    assert payload["websocket"] == {"url": "ws://robot-pc.local:9000/"}
+    assert payload["firmware"]["version"] == "0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_xiaozhi_ota_tolerates_bad_json_and_ipv6_host():
+    from stackchan_mcp.capture_server import handle_xiaozhi_ota
+
+    app = create_capture_app(ota_ws_port=8765)
+    bad = FakeOtaRequest(app, body=json.JSONDecodeError("x", "y", 0), host="[fe80::1]:8766")
+    payload = json.loads((await handle_xiaozhi_ota(bad)).text)
+    assert payload["websocket"]["url"] == "ws://[fe80::1]:8765/"
+    assert payload["firmware"]["version"] == "0.0.0"
+
+
+def test_build_ota_response_is_deterministic_for_a_fixed_clock():
+    from stackchan_mcp.capture_server import build_ota_response
+
+    payload = build_ota_response(device_version="2.5.3", websocket_url="ws://h:1/", now=1_760_000_000.5)
+    assert payload["server_time"]["timestamp"] == 1_760_000_000_500
+    assert payload["websocket"] == {"url": "ws://h:1/"}

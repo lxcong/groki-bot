@@ -44,6 +44,8 @@ Environment variables:
   HOST              Bind address for the ESP32 WebSocket server (default 0.0.0.0).
   WS_PORT           Port for the ESP32 WebSocket server (default 8765).
   CAPTURE_PORT      Port for the HTTP capture server (default 8766).
+  STACKCHAN_OTA_WS_URL  WebSocket URL handed to upstream xiaozhi-esp32 firmware by
+                    /xiaozhi/ota/ (default: ws://<host the device called>:WS_PORT/).
 
   GEMINI_API_KEY    Google AI Studio key for Gemini Live voice conversation.
 

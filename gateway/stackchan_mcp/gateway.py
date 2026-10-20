@@ -368,6 +368,11 @@ class Gateway:
         app = create_capture_app(
             capture_token=self.vision_token,
             inject_text_handler=self._inject_debug_text,
+            # /xiaozhi/ota/ for upstream xiaozhi-esp32 firmware: the device
+            # learns this gateway's WebSocket URL from its OTA check.
+            ota_ws_port=ws_port,
+            ota_ws_url=os.getenv("STACKCHAN_OTA_WS_URL", ""),
+            ota_token=os.getenv("STACKCHAN_TOKEN", ""),
         )
         app.router.add_post("/track", self._handle_track)
         app.router.add_post("/demo/intro", self._handle_demo_intro)
