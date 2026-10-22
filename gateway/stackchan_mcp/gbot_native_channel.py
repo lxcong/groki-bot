@@ -88,9 +88,15 @@ class NativeVoiceChannel:
             },
             allow_redirects=False,
         ) as response:
-            logger.info("Grok native presence on=%s status=%d", on, response.status)
             if response.status != 200:
+                detail = ""
+                try:
+                    detail = str((await response.json()).get("error", ""))[:60]
+                except Exception:
+                    pass
+                logger.info("Grok native presence on=%s status=%d error=%s", on, response.status, detail or "?")
                 raise RuntimeError("native_presence_unavailable")
+            logger.info("Grok native presence on=%s status=%d", on, response.status)
             result = await response.json()
             if result.get("ok") is False:
                 raise RuntimeError("native_presence_rejected")

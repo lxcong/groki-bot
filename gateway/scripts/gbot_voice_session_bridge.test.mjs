@@ -55,7 +55,8 @@ test('native bootstrap uses fixed read-only request and cancels bodies without r
     paths.push(new URL(url).pathname); assert.equal(options.redirect,'error');
     return {ok:true,status:200,headers:new Headers({'content-type':'text/event-stream'}),body:{cancel:async()=>{cancelled++;}},json:()=>assert.fail('must not read body')};
   }});
-  const result = await client.probe(); assert.equal(result.ok,true); assert.deepEqual(paths,['/health','/events']); assert.equal(cancelled,2);
+  // connect verifies /health once before the connection is cached, then probe checks it again
+  const result = await client.probe(); assert.equal(result.ok,true); assert.deepEqual(paths,['/health','/health','/events']); assert.equal(cancelled,3);
   assert.equal(JSON.stringify(result).includes('FAKE'),false);
 });
 
@@ -227,5 +228,34 @@ test('a new call takes over a stale active call that has no event stream, but no
     await new Promise(resolve=>setTimeout(resolve,20));
     assert.equal((await post('/native/presence',{agentId:'a',callId:'call-x',isOnTheLine:true,acceptsOverheard:false})).status,200);
   } finally {await reader?.cancel();server.closeAllConnections();await new Promise(r=>server.close(r));}
+});
+
+test('sandbox client waits for a waking box, reconnects after a 5xx and keeps the box awake', async () => {
+  const {NativeSandboxClient} = await import('./gbot_voice_session_bridge.mjs');
+  const rpcs=[]; const paths=[]; const logs=[];
+  let healthFailures=1, tokens=0;
+  const client = new NativeSandboxClient({connectMode:'normal', wakePollMs:1, wakeTimeoutMs:5000, log:(source,state,extra)=>logs.push([source,state,extra]),
+    accountLoader:()=>({authId:'owner'}),
+    rpc:async(method,body)=>{
+      assert.equal(method,'EnsureSandBox'); assert.deepEqual(body,{});
+      rpcs.push(1);
+      const runState = rpcs.length < 3 ? 'SAND_BOX_RUN_STATE_WAKING' : 'SAND_BOX_RUN_STATE_RUNNING';
+      return {gatewayUrl:'https://pod.cursorvm.com', gatewayToken:'FAKE'+(++tokens), runState};
+    },
+    fetcher:async(url,options)=>{
+      const path=new URL(url).pathname; paths.push([path, options.headers.authorization]);
+      if (path==='/health' && healthFailures>0) { healthFailures--; return {ok:false,status:503,body:{cancel:async()=>{}}}; }
+      if (path==='/api/setVoiceCallPresence' && options.headers.authorization==='Bearer FAKE3') return {ok:false,status:502,body:{cancel:async()=>{}}};
+      return {ok:true,status:200,headers:new Headers({'content-type':'text/event-stream'}),body:{cancel:async()=>{}}};
+    }});
+  await client.presence({agentId:'a',callId:'c',isOnTheLine:true,acceptsOverheard:false});
+  // two WAKING answers, then RUNNING; /health 503 once, then ok; the presence call itself got a 502
+  // on the first connection (token FAKE3) and succeeded after a reconnect (token FAKE4).
+  assert.equal(rpcs.length,4);
+  assert.deepEqual(paths.map(p=>p[0]),['/health','/health','/api/setVoiceCallPresence','/health','/api/setVoiceCallPresence']);
+  assert.equal(paths.at(-1)[1],'Bearer FAKE4');
+  assert.deepEqual(logs.map(l=>l[1]),['waking','awake','reconnect']);
+  await client.keepAwake();
+  assert.equal(paths.at(-1)[0],'/health'); assert.equal(rpcs.length,4);  // cached connection, no new wake
 });
 

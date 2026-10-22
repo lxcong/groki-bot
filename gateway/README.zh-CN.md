@@ -341,6 +341,7 @@ curl -s -X POST http://127.0.0.1:18770/send \
 | `STACKCHAN_VOICE_BACKEND` | `gemini` | `gbot` 使用 Grok 登录态语音；`xiaozhi` 转发到 XiaoZhi 云服务 |
 | `STACKCHAN_GBOT_VOICE_BOT_ID` | 无 | Grok 语音智能体 ID，登录桥与网关必须一致 |
 | `STACKCHAN_GBOT_VOICE_URL` | `http://127.0.0.1:18771` | 仅本机 HTTP 登录桥地址 |
+| `STACKCHAN_GBOT_KEEP_BOX_AWAKE_S` | `240` | 登录桥每隔这么多秒访问一次 Grok Bot 沙箱的 `/health`，让它不休眠，任务转交不用等唤醒；设为 `0` 关闭（登录桥环境变量） |
 | `STACKCHAN_GBOT_VOICE_LANGUAGE` | `zh` | 输入转写语言，如 `en` 或 `auto` |
 | `STACKCHAN_GBOT_VOICE_AGENT_NAME` | `Groki` | Grok 语音通话里机器人的名字；存在 `personality.md` 时，文件内容作为通话描述发给 Grok（它是谁、怎么说话） |
 | `STACKCHAN_GBOT_VOICE_USER_NAME` | 空 | 可选，Grok 通话里对说话人的称呼 |
@@ -372,6 +373,7 @@ curl -s -X POST http://127.0.0.1:18770/send \
 | 报 `sherpa-onnx unavailable` 或 `Library not loaded: libonnxruntime` | 重新运行 `uv sync --all-extras`，它会安装自带运行库的 `sherpa-onnx-core`。 |
 | 报 `Could not find Opus library` | 安装 Opus（`brew install opus` 或 `apt install libopus0`）。 |
 | 语音回答“桌面助手暂时连不上”，日志里 `send_task outcome=native_not_ready`、`Grok native presence ... status=409` | 登录桥还把上一通通话记成活动通话（网关被杀掉时没来得及注销）。现在旧通话没有事件流时会被新通话自动接管；若仍 409，重启登录桥（它会在终端里打印 `stale_call_replaced`）。 |
+| 同上，但 `status=502 error=upstream_http_5xx` 或 `sandbox_waking` 持续几十秒 | Grok Bot 的沙箱睡着了，唤醒要几十秒。登录桥现在会等沙箱 RUNNING 并探测 `/health` 后才注册通话、遇到 5xx 重连一次，并默认每 4 分钟保活一次（`STACKCHAN_GBOT_KEEP_BOX_AWAKE_S`）；终端里会打印 `waking` / `awake` / `keep_awake_failed`。 |
 | 设备在听，但没有 `user transcript` | 看每 3 秒一行的 `device mic level`：安静时约 -60 dBFS、说话时应到 -30 dBFS 以上。设 `STACKCHAN_MIC_DUMP=/path/mic.raw` 启动网关可把设备送来的 16 kHz 单声道 s16le 原样存盘分析；固件侧可开 `CONFIG_USE_AUDIO_DEBUGGER` 抓 AFE 之前的双通道原始输入。 |
 | 头不跟着人脸转 | 看 `/debug/status` 的 `face_tracking`。是 `null`：网关版本太旧或没有重启。`tracker_running: false`：先编译追踪程序，或在日志里找 `face tracker exited returncode=2`（没有摄像头或没有摄像头权限，见[允许使用摄像头](#允许使用摄像头)）。`face_reported: false`：摄像头没看到人脸。`head_follow: false`：说「看着我」。这些都正常但头不动：固件太旧，不认 `head` 消息，需要更新固件。 |
 | 刷固件提示串口被占用 | 如果开了 `STACKCHAN_USB_TRANSPORT`，先停掉网关。 |

@@ -97,31 +97,73 @@ export function validateSandboxUrl(raw) {
   return url.toString().replace(/\/$/, '');
 }
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 export class NativeSandboxClient {
   #connection;
   #loading;
-  constructor({rpc = accountRpc, fetcher = fetch, accountLoader = loadAccount, connectMode = 'locate'} = {}) {
+  // The box sleeps when idle. EnsureSandBox in 'normal' mode wakes it, but the
+  // box gateway answers 5xx until the run state is RUNNING, so a connection is
+  // only cached once the box reports running and /health answers; a later 5xx
+  // (the box restarted with new tokens) drops the cache and reconnects once.
+  constructor({rpc = accountRpc, fetcher = fetch, accountLoader = loadAccount, connectMode = 'locate', wakeTimeoutMs = 90000, wakePollMs = 2000, log = () => {}} = {}) {
     if (!['locate', 'normal'].includes(connectMode)) throw new Error('invalid_connect_mode');
     this.connectMode = connectMode;
     this.rpc = rpc; this.fetcher = fetcher; this.accountLoader = accountLoader;
+    this.wakeTimeoutMs = wakeTimeoutMs; this.wakePollMs = wakePollMs; this.log = log;
   }
+  reset() { this.#connection = undefined; }
   async #connect() {
     if (this.#connection) return this.#connection;
     if (!this.#loading) this.#loading = (async () => {
       const account = this.accountLoader();
-      const raw = await this.rpc('EnsureSandBox', this.connectMode === 'normal' ? {} : {wake: false, supportsAsleepBox: true}, {accountLoader: () => account, fetcher: this.fetcher});
+      const body = this.connectMode === 'normal' ? {} : {wake: false, supportsAsleepBox: true};
+      const deadline = Date.now() + this.wakeTimeoutMs;
+      let raw = await this.rpc('EnsureSandBox', body, {accountLoader: () => account, fetcher: this.fetcher});
       if (typeof raw.gatewayToken !== 'string' || !raw.gatewayToken) throw new Error('sandbox_connection_unavailable');
+      let waited = false;
+      while (this.connectMode === 'normal' && typeof raw.runState === 'string' && !/RUNNING$/.test(raw.runState)) {
+        if (Date.now() >= deadline) throw new Error('sandbox_waking');
+        if (!waited) this.log('box', 'waking', {run_state: raw.runState}); waited = true;
+        await sleep(this.wakePollMs);
+        raw = await this.rpc('EnsureSandBox', body, {accountLoader: () => account, fetcher: this.fetcher});
+        if (typeof raw.gatewayToken !== 'string' || !raw.gatewayToken) throw new Error('sandbox_connection_unavailable');
+      }
       const headers = {authorization: `Bearer ${raw.gatewayToken}`};
       const network = raw.networkToken ?? raw.gatewayHeaders?.['x-anyrun-network-token'];
       if (typeof network === 'string' && network) headers['x-anyrun-network-token'] = network;
-      this.#connection = {baseUrl: validateSandboxUrl(raw.gatewayUrl), headers, authId: account.authId, responseFields: Object.keys(raw).sort()};
+      const connection = {baseUrl: validateSandboxUrl(raw.gatewayUrl), headers, authId: account.authId, responseFields: Object.keys(raw).sort()};
+      // The gateway inside the box comes up a little after the run state flips.
+      for (;;) {
+        const health = await this.fetcher(connection.baseUrl + '/health', {redirect: 'error', headers: connection.headers, signal: AbortSignal.timeout(20000)});
+        await health.body?.cancel();
+        if (health.ok) break;
+        if (health.status < 500 || Date.now() >= deadline) throw new Error(`upstream_http_${health.status}`);
+        if (!waited) this.log('box', 'waking', {http_status: health.status}); waited = true;
+        await sleep(this.wakePollMs);
+      }
+      if (waited) this.log('box', 'awake', {http_status: 200});
+      this.#connection = connection;
       return this.#connection;
     })().finally(() => { this.#loading = undefined; });
     return this.#loading;
   }
-  async #fetch(path, options = {}) {
+  async #fetch(path, options = {}, retried = false) {
     const connection = await this.#connect();
-    return this.fetcher(connection.baseUrl + path, {...options, redirect: 'error', headers: {...connection.headers, ...options.headers}});
+    const response = await this.fetcher(connection.baseUrl + path, {...options, redirect: 'error', headers: {...connection.headers, ...options.headers}});
+    if (response.status >= 500 && !retried) {
+      // The box restarted (new tokens) or went back to sleep: reconnect once.
+      await response.body?.cancel();
+      this.log('box', 'reconnect', {http_status: response.status});
+      this.reset();
+      return this.#fetch(path, options, true);
+    }
+    return response;
+  }
+  async keepAwake() {
+    const health = await this.#fetch('/health', {signal: AbortSignal.timeout(20000)});
+    await health.body?.cancel();
+    if (!health.ok) throw new Error(`upstream_http_${health.status}`);
   }
   async openEvents(signal) {
     const deadline = new AbortController();
@@ -336,6 +378,14 @@ export function createBridge({ port = 18771, rpc = accountRpc, agentId = process
   let activeCall = null;
   let presenceBusy = false;
   const streams = new Set();
+  sandbox.log = logStream;
+  // Keep the box awake while the bridge runs so a hand-off never waits for a wake-up.
+  const keepAwakeMs = Number(process.env.STACKCHAN_GBOT_KEEP_BOX_AWAKE_S ?? 240) * 1000;
+  if ((desktopEnabled || toolsEnabled) && Number.isFinite(keepAwakeMs) && keepAwakeMs >= 30000) {
+    const tick = () => sandbox.keepAwake().catch(error => logStream('box', 'keep_awake_failed', {error_class: error?.message?.replace(/[^a-z0-9_]/gi, '_').slice(0, 40) || 'error'}));
+    setTimeout(tick, 1000).unref();
+    setInterval(tick, keepAwakeMs).unref();
+  }
   return createServer(async (req, res) => {
     const send = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(value)); };
     const address = req.socket.remoteAddress;
@@ -484,7 +534,8 @@ export function createBridge({ port = 18771, rpc = accountRpc, agentId = process
       }
       return send(200, result);
     } catch (error) {
-      const safe = /^(upstream_http_\d{3}|login_unavailable|login_expired_open_grok_bot|unsupported_storage)$/.test(error.message) ? error.message : 'bridge_request_failed';
+      const safe = /^(upstream_http_\d{3}|login_unavailable|login_expired_open_grok_bot|unsupported_storage|sandbox_waking|sandbox_connection_unavailable)$/.test(error.message) ? error.message : 'bridge_request_failed';
+      if (nativePresence || route === 'POST /tool') logStream('box', 'request_failed', {route, error_class: safe});
       return send(502, { ok: false, error: safe });
     }
   });
