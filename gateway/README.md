@@ -402,7 +402,10 @@ reconnect the MCP client, after a change).
 | `STACKCHAN_GBOT_VOICE_BOT_ID` | none | Grok voice agent ID; helper and gateway must agree |
 | `STACKCHAN_GBOT_VOICE_URL` | `http://127.0.0.1:18771` | Loopback HTTP login helper only |
 | `STACKCHAN_GBOT_VOICE_LANGUAGE` | `zh` | Input transcription language, e.g. `en` or `auto` |
-| `STACKCHAN_PERSONALITY_FILE` | `personality.md` in this directory, if present | Extra persona text appended to Gemini's instructions. The built-in persona is a short one named Groki that replies in the user's language; text in this file overrides it where they differ (name, language, style) |
+| `STACKCHAN_GBOT_VOICE_AGENT_NAME` | `Groki` | Name the Grok voice call speaks as; with `personality.md` present, that file is sent as the call description (who the agent is and how it talks) |
+| `STACKCHAN_GBOT_VOICE_USER_NAME` | empty | Optional name the Grok call uses for the person speaking |
+| `STACKCHAN_GBOT_VOICE_NAME` | empty (server default, sounds like `ara`) | Grok voice id. `scripts/sample_gbot_voices.py` renders one line per voice to wav for listening; an unknown id silently falls back to the default |
+| `STACKCHAN_PERSONALITY_FILE` | `personality.md` in this directory, if present | Extra persona text appended to Gemini's instructions and sent to Grok voice as the call description. The built-in persona is a short one named Groki that replies in the user's language; text in this file overrides it where they differ (name, language, style) |
 | `STACKCHAN_TOOL_BOT` | empty (off) | Agent name; enables native Grok desktop access or Gemini `ask_grokbot` |
 | `STACKCHAN_TOOL_BOT_ID` | empty | Required for native Grok; must match `STACKCHAN_GBOT_VOICE_BOT_ID`. Optional for Gemini |
 | `STACKCHAN_TOOL_BOT_PREFIX` | built-in read-aloud hint | Text put in front of every task; set it empty to send tasks as is (Gemini CLI path only) |

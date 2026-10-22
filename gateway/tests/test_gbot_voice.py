@@ -274,3 +274,86 @@ async def test_native_registration_failure_keeps_voice_start_running(monkeypatch
     assert b.running and not b._native.ready
     await b.stop()
     assert b._native._task.done()
+
+
+def test_session_request_carries_name_and_persona(monkeypatch):
+    """The persona file becomes the call description Grok speaks in."""
+    monkeypatch.setenv("STACKCHAN_GBOT_VOICE_AGENT_NAME", "小乐")
+    monkeypatch.setenv("STACKCHAN_GBOT_VOICE_USER_NAME", "主人")
+    b = GbotVoiceBridge(
+        on_audio=AsyncMock(),
+        on_turn_complete=AsyncMock(),
+        on_interrupt=AsyncMock(),
+        on_session_dead=AsyncMock(),
+        personality_loader=lambda: "  一只活泼的小白兔  \n",
+    )
+    assert b._session_request() == {
+        "agentId": b.agent_id,
+        "agentName": "小乐",
+        "spokenLanguage": "zh",
+        "description": "一只活泼的小白兔",
+        "userName": "主人",
+    }
+
+
+def test_session_request_without_persona_keeps_groki(monkeypatch):
+    monkeypatch.delenv("STACKCHAN_GBOT_VOICE_AGENT_NAME", raising=False)
+    monkeypatch.delenv("STACKCHAN_GBOT_VOICE_USER_NAME", raising=False)
+    b = GbotVoiceBridge(
+        on_audio=AsyncMock(),
+        on_turn_complete=AsyncMock(),
+        on_interrupt=AsyncMock(),
+        on_session_dead=AsyncMock(),
+        personality_loader=lambda: "",
+    )
+    assert b._session_request() == {
+        "agentId": b.agent_id,
+        "agentName": "Groki",
+        "spokenLanguage": "zh",
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_posts_persona_to_local_session(monkeypatch):
+    import time
+    from types import SimpleNamespace
+    from stackchan_mcp import gbot_voice_bridge as module
+
+    monkeypatch.setenv("STACKCHAN_GBOT_VOICE_AGENT_NAME", "小乐")
+    b = GbotVoiceBridge(
+        on_audio=AsyncMock(),
+        on_turn_complete=AsyncMock(),
+        on_interrupt=AsyncMock(),
+        on_session_dead=AsyncMock(),
+        personality_loader=lambda: "小白兔",
+    )
+    ws = SimpleNamespace(closed=False, send_json=AsyncMock(), close=AsyncMock())
+    http = SimpleNamespace(ws_connect=AsyncMock(return_value=ws), close=AsyncMock())
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda **kwargs: http)
+    posted = {}
+
+    async def local(path, payload=None):
+        if path == "/credential":
+            return {
+                "credential": {
+                    "websocketUrl": "wss://api.x.ai/v1/realtime",
+                    "model": "fixture",
+                    "clientSecret": "PRIVATE_FIXTURE",
+                    "expiresAtUnixSeconds": time.time() + 60,
+                }
+            }
+        posted[path] = payload
+        return {"instructions": "fixture", "tools": []}
+
+    b._local = local
+    b._configure_tools = lambda session: []
+
+    async def receive():
+        b._connected_event.set()
+        await asyncio.Event().wait()
+
+    b._receive = receive
+    await asyncio.wait_for(b.start(), 0.2)
+    assert posted["/session"]["agentName"] == "小乐"
+    assert posted["/session"]["description"] == "小白兔"
+    await b.stop()

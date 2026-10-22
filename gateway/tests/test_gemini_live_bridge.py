@@ -228,6 +228,7 @@ XIAOZHI_TOOLS = {
     "set_screen_theme",
     "start_game",
     "stop_game",
+    "rename_assistant",
 }
 
 
@@ -272,7 +273,7 @@ def test_build_function_declarations_match_tool_map():
 def test_build_function_declarations_includes_agent_tools():
     decls = build_function_declarations()
     names = [decl.name for decl in decls]
-    assert names[:13] == [
+    assert names[:14] == [
         "move_head",
         "set_avatar",
         "set_all_leds",
@@ -283,6 +284,7 @@ def test_build_function_declarations_includes_agent_tools():
         "set_screen_theme",
         "start_game",
         "stop_game",
+        "rename_assistant",
         "end_conversation",
         "ask_claude",
         "get_current_datetime",
@@ -371,7 +373,7 @@ def test_build_live_config_includes_system_instruction_and_tools():
     assert _modality_values(cfg.response_modalities) == ["AUDIO"]
     assert len(cfg.tools) == 2
     assert cfg.tools[0].google_search is not None
-    assert len(cfg.tools[1].function_declarations) == 24
+    assert len(cfg.tools[1].function_declarations) == 25
 
 
 def test_build_live_config_includes_google_search():

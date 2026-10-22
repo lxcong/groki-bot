@@ -122,6 +122,9 @@ TOOL_MAP: dict[str, str] = {
     "set_screen_theme": "self.screen.set_theme",
     "start_game": "self.game.start",
     "stop_game": "self.game.stop",
+    # Dispatched by _dispatch_rename (pinyin + persona.json), listed here so a
+    # device without the persona tools does not get the declaration.
+    "rename_assistant": "self.persona.set_name",
 }
 
 XIAOZHI_DEVICE_TOOL_NAMES = frozenset(
@@ -132,6 +135,7 @@ XIAOZHI_DEVICE_TOOL_NAMES = frozenset(
         "set_screen_theme",
         "start_game",
         "stop_game",
+        "rename_assistant",
     }
 )
 
@@ -187,6 +191,7 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
     "set_screen_theme": ToolMetadata(True, "device", 5.0),
     "start_game": ToolMetadata(True, "device", 5.0),
     "stop_game": ToolMetadata(True, "device", 5.0),
+    "rename_assistant": ToolMetadata(True, "device", 10.0),
     "end_conversation": ToolMetadata(True, "conversation", 5.0),
     "ask_grokbot": ToolMetadata(False, None, 8.0),
     "ask_claude": ToolMetadata(False, None, 35.0),
@@ -468,6 +473,21 @@ def build_function_declarations(*, types=None) -> list[Any]:
         description="Stop the mini game running on the device screen.",
         parameters=types.Schema(type="OBJECT", properties={}),
     )
+    rename_assistant = types.FunctionDeclaration(
+        name="rename_assistant",
+        description=(
+            "Give yourself the new name the user chose. The device's wake word becomes the "
+            "same name right away, and from the next conversation you speak as that name. "
+            "Only call it when the user clearly states the new name for you. "
+            "Chinese names of 2 to 4 characters only; the result's `spoken` says whether it "
+            "worked or why not."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"name": types.Schema(type="STRING", description="the new Chinese name, 2 to 4 characters")},
+            required=["name"],
+        ),
+    )
 
     device = (
         [
@@ -481,6 +501,7 @@ def build_function_declarations(*, types=None) -> list[Any]:
             set_screen_theme,
             start_game,
             stop_game,
+            rename_assistant,
         ]
         if device_tools_enabled()
         else []
@@ -713,6 +734,11 @@ You are speaking from a small device with its own speaker and screen. The user m
 Confirm each change in one short sentence."""
 
 
+RENAME_INSTRUCTION = """## Your name
+
+The user can rename you: when they clearly say a new name for you (以后叫你X / 给你改名叫X), call rename_assistant(name) with just that name. The device then wakes to the new name and the next conversation speaks as it. Say only the result's `spoken`; if it refused, ask for another name. Do not rename yourself on a passing mention or a joke; when unsure, ask once."""
+
+
 VOICE_ONLY_SYSTEM_INSTRUCTION = """## Speak first
 
 In small talk, answer out loud right away.
@@ -924,6 +950,8 @@ class VoiceToolExecutor:
             ]
             if "set_device_volume" in names:
                 parts.append(DEVICE_CONTROL_INSTRUCTION)
+            if "rename_assistant" in names:
+                parts.append(RENAME_INSTRUCTION)
             bot = tool_bot() if "ask_grokbot" in names else ""
             mac_enabled = bool(names & MAC_TOOL_NAMES)
             if bot:
@@ -1181,6 +1209,8 @@ class VoiceToolExecutor:
             return await self._dispatch_ask_claude(args)
         if name == "get_current_datetime":
             return self._dispatch_get_datetime()
+        if name == "rename_assistant":
+            return await self._dispatch_rename(args)
         if name in {"self.tracking.start", "self.tracking.stop"}:
             if self._set_face_tracking is None:
                 return {"ok": False, "error": "face tracking unavailable"}
@@ -1521,6 +1551,47 @@ class VoiceToolExecutor:
         if proc.returncode != 0:
             return {"ok": False, "error": stderr.decode(errors="replace").strip()}
         return {"ok": True, "answer": stdout.decode(errors="replace").strip()}
+
+    async def _dispatch_rename(self, args: dict[str, Any]) -> dict[str, Any]:
+        """rename_assistant: validate, derive pinyin, rename on the device, then save.
+
+        The device is the gate: its MultiNet decides whether it can listen for
+        the name, so persona.json only changes after the device accepted it.
+        ``spoken`` is what the model says back, in persona.
+        """
+        from . import persona as persona_mod  # noqa: PLC0415
+
+        try:
+            name = persona_mod.validate_name(args.get("name"))
+            pinyin = persona_mod.wake_pinyin(name)
+        except persona_mod.NameError_ as exc:
+            return {"ok": False, "error": exc.reason, "spoken": exc.spoken}
+        store = persona_mod.default_store()
+        current = store.load()
+        if store.exists and current.name == name and current.wake_pinyin == pinyin:
+            return {"ok": True, "name": name, "spoken": f"我本来就叫{name}呀，嘿嘿。"}
+        if not getattr(self._esp32, "device_connected", False):
+            return {
+                "ok": False,
+                "error": "device offline",
+                "spoken": "小机器这会儿没连上，等它在线了再给我改名字吧。",
+            }
+        ok, error = await persona_mod.rename_on_device(self._esp32, name, pinyin)
+        if not ok:
+            logger.warning("rename_assistant refused by device: %s", error)
+            return {
+                "ok": False,
+                "error": error,
+                "spoken": f"呜，{name}这个名字我学不会怎么听，换一个两到四个字的名字试试？",
+            }
+        store.rename(name, pinyin)
+        logger.info("rename_assistant: %s -> %s (%s)", current.name, name, pinyin)
+        return {
+            "ok": True,
+            "name": name,
+            "wake_pinyin": pinyin,
+            "spoken": f"好啦，从现在起我就叫{name}，想叫我的时候喊一声{name}就行。下次聊天我就完全是{name}啦！",
+        }
 
     @staticmethod
     def _dispatch_get_datetime() -> dict[str, Any]:

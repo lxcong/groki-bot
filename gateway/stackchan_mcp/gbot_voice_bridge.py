@@ -23,6 +23,7 @@ import aiohttp
 
 from .voice_output_queue import VoiceOutputQueue
 from .gbot_native_channel import NativeVoiceChannel
+from .personality import load_personality_file
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,8 @@ class GbotVoiceBridge:
         tool_extensions=(),
         local_tools=True,
         conversation_idle_timeout_s=8.0,
+        agent_name=None,
+        personality_loader=None,
     ):
         self.url = validate_bridge_url(
             bridge_url
@@ -140,6 +143,15 @@ class GbotVoiceBridge:
             or os.getenv("STACKCHAN_TOOL_BOT_ID", "")
         )
         self.language = os.getenv("STACKCHAN_GBOT_VOICE_LANGUAGE", "zh")
+        # Name and persona the Grok call harness builds its instructions from:
+        # the description is "who you are and how you speak" for every line.
+        # An explicit agent_name (tests, embedding code) is fixed; otherwise the
+        # name follows persona.json, which the user changes by renaming the
+        # assistant in a conversation, then the env default.
+        self._fixed_agent_name = (agent_name or "").strip()
+        self._env_agent_name = os.getenv("STACKCHAN_GBOT_VOICE_AGENT_NAME", "").strip()
+        self.user_name = os.getenv("STACKCHAN_GBOT_VOICE_USER_NAME", "").strip()
+        self._personality_loader = personality_loader or load_personality_file
         self.call_id = str(uuid.uuid4())
         self._on_transcript = on_transcript
         self._on_text = on_text
@@ -273,6 +285,39 @@ class GbotVoiceBridge:
         self.metrics["declared_tools"] = names
         logger.info("Grok voice declared tools=%s", ",".join(names))
         return declarations
+
+    @property
+    def agent_name(self) -> str:
+        if self._fixed_agent_name:
+            return self._fixed_agent_name
+        try:
+            from .persona import default_store  # noqa: PLC0415
+
+            store = default_store()
+            if store.exists:
+                return store.load().name
+        except Exception:  # pragma: no cover - persona.json unreadable
+            logger.exception("persona.json unreadable; using the env agent name")
+        return self._env_agent_name or "Groki"
+
+    def _session_request(self):
+        """Body for the local /session call: name, persona and language."""
+        request = {
+            "agentId": self.agent_id,
+            "agentName": self.agent_name,
+            "spokenLanguage": self.language,
+        }
+        persona = self._personality_loader().strip()
+        if persona:
+            request["description"] = persona
+        if self.user_name:
+            request["userName"] = self.user_name
+        logger.info(
+            "Grok voice session persona: name=%s description_chars=%d",
+            self.agent_name,
+            len(persona),
+        )
+        return request
 
     def _provider_tool_instructions(self):
         if not self._executor or not self._local_tools_enabled:
@@ -583,11 +628,7 @@ class GbotVoiceBridge:
                 self._local("/credential"),
                 self._local(
                     "/session",
-                    {
-                        "agentId": self.agent_id,
-                        "agentName": "Groki",
-                        "spokenLanguage": self.language,
-                    },
+                    self._session_request(),
                 ),
             )
             stage = "voice_websocket"

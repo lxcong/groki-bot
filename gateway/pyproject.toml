@@ -33,6 +33,7 @@ dependencies = [
     "aiohttp>=3",
     "pyserial>=3.5",
     "edge-tts>=7",
+    "pypinyin>=0.50",
 ]
 
 [project.optional-dependencies]

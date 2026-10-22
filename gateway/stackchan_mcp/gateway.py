@@ -112,6 +112,7 @@ class Gateway:
             cloud_proxy_factory=self._make_voice_proxy,
             usb_transport=self.usb_transport,
             local_tool_handler=self._handle_external_local_tool,
+            on_device_ready=self._sync_persona,
         )
         self.demo_reactions = DemoReactions(
             self.esp32,
@@ -279,6 +280,15 @@ class Gateway:
             on_device_state=self.idle_gate.notify_device_state,
             set_face_tracking=self._set_face_tracking_from_voice,
         )
+
+    async def _sync_persona(self, esp32, device_id: str) -> None:
+        """Keep persona.json and the device's name / wake word the same (see persona.py)."""
+        if "self.persona.get" not in getattr(esp32, "known_tool_names", set()):
+            return
+        from .persona import sync_device_persona  # noqa: PLC0415
+
+        outcome = await sync_device_persona(esp32)
+        logger.info("persona sync with %s: %s", device_id, outcome)
 
     async def _set_face_tracking_from_voice(self, enabled: bool) -> dict:
         return await self._handle_external_local_tool("set_face_tracking", {"enabled": enabled})

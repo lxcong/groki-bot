@@ -49,6 +49,19 @@ Gemini ask_grokbot → optional localhost:18770 → gbot CLI → Grok Bot
   里找不到时，会用 yt-dlp 在线搜索第一条结果来播（`STACKCHAN_MUSIC_ONLINE=0` 关闭），搜索大约要 4 秒。
   想让所有「放音乐」都落到设备上，就不要开 `STACKCHAN_MAC_CONTROL`，否则模型可能去控制 Mac 的音乐 App。
 
+### 在对话里给小乐改名（名字和唤醒词一起换）
+
+小乐固件的唤醒词是 MultiNet 命令词（按拼音匹配），换词不用换模型、不用重刷。语音模型拿到
+`rename_assistant(name)` 工具：用户说「以后叫你阿福」时，网关用 pypinyin 得到 `a fu`，调设备的
+MCP 工具 `self.persona.set_name`，设备当场把唤醒词换成新名字并写进 NVS（重启、重刷资源都保留）；
+设备接受后网关才把名字写进 `persona.json`（`STACKCHAN_PERSONA_FILE`，默认本目录）。名字限
+2–4 个汉字；MultiNet 念不出来的词会被设备拒绝，旧名字保留，模型会请用户换一个。
+
+`personality.md` 是模板：`{{name}}`、`{{wake_word}}`、`{{appearance}}` 在每次建立语音会话时用
+`persona.json` 填好，Grok 通话的 `agentName` 也跟着它（设了 `STACKCHAN_GBOT_VOICE_AGENT_NAME`
+只在还没有 `persona.json` 时生效）。所以改名在**下一通对话**才完全生效，当前这通只是口头确认。
+设备每次连上来网关都会对账：还没有 `persona.json` 时采用设备上的名字；有了以后以文件为准推给设备。
+
 ### Grok Bot 0.72.0 登录态语音的实测说明
 
 - 登录桥必须在**你自己的终端**里启动：它用 `security` 读钥匙串里的「Grok Bot Safe Storage」，
@@ -346,6 +359,7 @@ curl -s -X POST http://127.0.0.1:18770/send \
 | `STACKCHAN_GBOT_VOICE_AGENT_NAME` | `Groki` | Grok 语音通话里机器人的名字；存在 `personality.md` 时，文件内容作为通话描述发给 Grok（它是谁、怎么说话） |
 | `STACKCHAN_GBOT_VOICE_USER_NAME` | 空 | 可选，Grok 通话里对说话人的称呼 |
 | `STACKCHAN_GBOT_VOICE_NAME` | 空（服务端默认，听感同 `ara`） | Grok 音色 id。`scripts/sample_gbot_voices.py` 可以用同一句话给每个音色生成 wav 试听；无效的 id 会静默回落到默认音色 |
+| `STACKCHAN_PERSONA_FILE` | 本目录的 `persona.json` | 用户在对话里给机器人起的名字和唤醒词拼音（`rename_assistant` 写入，设备连上时对账）。`personality.md` 里的 `{{name}}` 等占位符从这里填 |
 | `STACKCHAN_PERSONALITY_FILE` | 本目录的 `personality.md`（存在时） | 追加到 Gemini 指令后面、同时作为 Grok 语音通话描述的人设文字。内置人设很简短：名字叫 Groki，用用户说话的语言回答；这个文件里的内容和它不一致时（名字、语言、风格）以文件为准 |
 | `STACKCHAN_TOOL_BOT` | 空（关闭） | 目标智能体名字；启用 Grok 原生桌面联动，或 Gemini 的 `ask_grokbot` |
 | `STACKCHAN_TOOL_BOT_ID` | 空 | Grok 原生路径必填，须匹配 `STACKCHAN_GBOT_VOICE_BOT_ID`；Gemini 路径可选 |

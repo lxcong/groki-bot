@@ -338,8 +338,12 @@ class ESP32Manager:
         usb_transport: Any | None = None,
         local_tool_handler: Callable[[str, dict[str, Any]], Any] | None = None,
         debug_status: DebugStatus | None = None,
+        on_device_ready: Callable[["ESP32Manager", str], Any] | None = None,
     ):
         self._debug_status = debug_status or get_debug_status()
+        # Awaited once a device finished MCP initialization (tools known); the
+        # gateway reconciles the persona (name / wake word) with the device here.
+        self._on_device_ready = on_device_ready
         self._connection: ESP32Connection | None = None
         self._server: Any = None
         self._lock = asyncio.Lock()
@@ -633,6 +637,13 @@ class ESP32Manager:
                 device_id,
                 len(connection.tools),
             )
+            if self._on_device_ready is not None:
+                try:
+                    outcome = self._on_device_ready(self, device_id)
+                    if inspect.isawaitable(outcome):
+                        await outcome
+                except Exception:
+                    logger.exception("on_device_ready handler failed")
         else:
             logger.error("ESP32 MCP initialization failed")
 

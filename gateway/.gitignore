@@ -35,3 +35,6 @@ build/
 dist/
 .debug-memleak/
 *.log
+
+# Name / wake word the user gave the assistant in a conversation (stackchan_mcp/persona.py)
+persona.json

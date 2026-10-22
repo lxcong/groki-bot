@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable
 
 from .debug_status import DebugStatus, get_debug_status
 from .gbot_brain import tool_bot
+from .personality import personality_path
 
 
 from .voice_output_queue import VoiceOutputQueue
@@ -89,11 +90,8 @@ Always reply in the language the user is speaking (for example, Chinese when the
 
 def _personality_path() -> Path:
     """Optional personality file: STACKCHAN_PERSONALITY_FILE, else
-    ``personality.md`` in the gateway directory."""
-    raw = os.getenv("STACKCHAN_PERSONALITY_FILE", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return Path(__file__).resolve().parents[1] / "personality.md"
+    ``personality.md`` in the gateway directory (shared with Grok voice)."""
+    return personality_path()
 
 
 # Short and neutral on purpose: a personality file appended under
@@ -259,9 +257,8 @@ PersonalityLoader = Callable[[], str]
 
 def _default_personality_loader() -> str:
     """Read the personality file if it exists, otherwise return ''."""
-    path = _personality_path()
     try:
-        return path.read_text(encoding="utf-8").strip()
+        return _personality_path().read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         return ""
 
