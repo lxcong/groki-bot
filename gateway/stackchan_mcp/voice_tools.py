@@ -113,7 +113,27 @@ TOOL_MAP: dict[str, str] = {
     "move_head": "self.robot.set_head_angles",
     "set_avatar": "self.display.set_avatar",
     "set_all_leds": "self.led.set_all",
+    # Upstream xiaozhi-esp32 firmware tools (main/mcp_server.cc and the board's
+    # InitializeTools). Declared with the device tools; a device that does not
+    # offer one answers "not offered by device".
+    "get_device_status": "self.get_device_status",
+    "set_device_volume": "self.audio_speaker.set_volume",
+    "set_screen_brightness": "self.screen.set_brightness",
+    "set_screen_theme": "self.screen.set_theme",
+    "start_game": "self.game.start",
+    "stop_game": "self.game.stop",
 }
+
+XIAOZHI_DEVICE_TOOL_NAMES = frozenset(
+    {
+        "get_device_status",
+        "set_device_volume",
+        "set_screen_brightness",
+        "set_screen_theme",
+        "start_game",
+        "stop_game",
+    }
+)
 
 
 AVATAR_FACE_ENUM = [
@@ -161,6 +181,12 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
     "set_avatar": ToolMetadata(True, "device", 5.0),
     "set_all_leds": ToolMetadata(True, "device", 5.0),
     "express_emotion": ToolMetadata(True, "device", 5.0),
+    "get_device_status": ToolMetadata(False, None, 5.0),
+    "set_device_volume": ToolMetadata(True, "device", 5.0),
+    "set_screen_brightness": ToolMetadata(True, "device", 5.0),
+    "set_screen_theme": ToolMetadata(True, "device", 5.0),
+    "start_game": ToolMetadata(True, "device", 5.0),
+    "stop_game": ToolMetadata(True, "device", 5.0),
     "end_conversation": ToolMetadata(True, "conversation", 5.0),
     "ask_grokbot": ToolMetadata(False, None, 8.0),
     "ask_claude": ToolMetadata(False, None, 35.0),
@@ -380,8 +406,82 @@ def build_function_declarations(*, types=None) -> list[Any]:
         parameters=types.Schema(type="OBJECT", properties={}),
     )
 
+    get_device_status = types.FunctionDeclaration(
+        name="get_device_status",
+        description=(
+            "Read the device's current state: speaker volume, screen brightness and theme, "
+            "battery, network. Call it before a relative change such as turning the volume up "
+            "or down a bit, so the new absolute value is based on the current one."
+        ),
+        parameters=types.Schema(type="OBJECT", properties={}),
+    )
+    set_device_volume = types.FunctionDeclaration(
+        name="set_device_volume",
+        description=(
+            "Set the device's own speaker volume (the voice you are speaking with), 0..100. "
+            "This is the device, not the Mac."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"volume": types.Schema(type="INTEGER", description="0..100")},
+            required=["volume"],
+        ),
+    )
+    set_screen_brightness = types.FunctionDeclaration(
+        name="set_screen_brightness",
+        description="Set the device screen brightness, 0..100.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"brightness": types.Schema(type="INTEGER", description="0..100")},
+            required=["brightness"],
+        ),
+    )
+    set_screen_theme = types.FunctionDeclaration(
+        name="set_screen_theme",
+        description="Switch the device screen between the light and dark theme.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "theme": types.Schema(
+                    type="STRING",
+                    format="enum",
+                    enum=["light", "dark"],
+                    description="light or dark",
+                ),
+            },
+            required=["theme"],
+        ),
+    )
+    start_game = types.FunctionDeclaration(
+        name="start_game",
+        description=(
+            "Start a mini game on the device screen that the user plays by touch. "
+            "Games: catch (throw and catch a ball). Call it when the user wants to play a game."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"name": types.Schema(type="STRING", description="game name, default catch")},
+        ),
+    )
+    stop_game = types.FunctionDeclaration(
+        name="stop_game",
+        description="Stop the mini game running on the device screen.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    )
+
     device = (
-        [move_head, set_avatar, set_all_leds, express_emotion]
+        [
+            move_head,
+            set_avatar,
+            set_all_leds,
+            express_emotion,
+            get_device_status,
+            set_device_volume,
+            set_screen_brightness,
+            set_screen_theme,
+            start_game,
+            stop_game,
+        ]
         if device_tools_enabled()
         else []
     )
@@ -603,6 +703,16 @@ Examples: the user sounds tired → express_emotion(mood="tired", intensity="low
 This does not change when a conversation ends: call end_conversation only when the user clearly says goodbye or that they are done talking."""
 
 
+DEVICE_CONTROL_INSTRUCTION = """## The device
+
+You are speaking from a small device with its own speaker and screen. The user may ask you to control it:
+- set_device_volume(volume) sets the device's speaker volume 0..100; set_screen_brightness(brightness) the screen brightness 0..100; set_screen_theme(theme) switches between light and dark
+- for a relative change ("a bit louder", "turn it down") call get_device_status first and then set the new absolute value; "mute" means volume 0
+- "volume" means this device's speaker unless the user says the Mac, the computer or the music player
+- start_game(name) starts a touch mini game on the screen (catch / 抛接球); stop_game() ends it
+Confirm each change in one short sentence."""
+
+
 VOICE_ONLY_SYSTEM_INSTRUCTION = """## Speak first
 
 In small talk, answer out loud right away.
@@ -794,6 +904,8 @@ class VoiceToolExecutor:
                     ask_claude="ask_claude" in names, model_search=model_search
                 ),
             ]
+            if "set_device_volume" in names:
+                parts.append(DEVICE_CONTROL_INSTRUCTION)
             bot = tool_bot() if "ask_grokbot" in names else ""
             mac_enabled = bool(names & MAC_TOOL_NAMES)
             if bot:
@@ -1509,4 +1621,16 @@ class VoiceToolExecutor:
                 "g": max(0, min(255, int(args.get("g", 0)))),
                 "b": max(0, min(255, int(args.get("b", 0)))),
             }
+        if name == "set_device_volume":
+            return {"volume": max(0, min(100, int(args.get("volume", 50))))}
+        if name == "set_screen_brightness":
+            return {"brightness": max(0, min(100, int(args.get("brightness", 50))))}
+        if name == "set_screen_theme":
+            theme = str(args.get("theme", "light")).strip().lower()
+            return {"theme": theme if theme in {"light", "dark"} else "light"}
+        if name == "start_game":
+            game = str(args.get("name", "catch")).strip() or "catch"
+            return {"name": game}
+        if name in {"get_device_status", "stop_game"}:
+            return {}
         return args

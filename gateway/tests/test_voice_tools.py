@@ -329,3 +329,43 @@ async def test_claude_cancellation_terminates_and_reaps_child(monkeypatch):
     assert process.returncode == -9
     process.wait.assert_awaited_once()
     await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_xiaozhi_device_tools_map_to_firmware_mcp_names_with_clamped_args():
+    """Upstream xiaozhi firmware tools (volume, screen, status, games) reach the device."""
+    device = SimpleNamespace(
+        device_connected=True, call_tool=AsyncMock(return_value=(True, None))
+    )
+    executor = VoiceToolExecutor(device, mac_controller=SimpleNamespace())
+    try:
+        names = {entry["name"] for entry in executor.declarations()}
+        assert voice_tools.XIAOZHI_DEVICE_TOOL_NAMES <= names
+        assert "## The device" in executor.instructions()
+
+        assert (await executor.execute("set_device_volume", {"volume": 150}))["ok"]
+        device.call_tool.assert_awaited_with("self.audio_speaker.set_volume", {"volume": 100})
+        assert (await executor.execute("set_screen_brightness", {"brightness": -5}))["ok"]
+        device.call_tool.assert_awaited_with("self.screen.set_brightness", {"brightness": 0})
+        assert (await executor.execute("set_screen_theme", {"theme": "dark"}))["ok"]
+        device.call_tool.assert_awaited_with("self.screen.set_theme", {"theme": "dark"})
+        calls = device.call_tool.await_count
+        assert not (await executor.execute("set_screen_theme", {"theme": "blue"}))["ok"]
+        assert device.call_tool.await_count == calls  # rejected by the enum, never dispatched
+        assert (await executor.execute("start_game", {}))["ok"]
+        device.call_tool.assert_awaited_with("self.game.start", {"name": "catch"})
+        assert (await executor.execute("stop_game", {"unexpected": 1}))["ok"]
+        device.call_tool.assert_awaited_with("self.game.stop", {})
+
+        device.call_tool = AsyncMock(return_value=({"audio_speaker": {"volume": 70}}, None))
+        result = await executor.execute("get_device_status", {})
+        assert result == {"ok": True, "result": {"audio_speaker": {"volume": 70}}}
+        device.call_tool.assert_awaited_once_with("self.get_device_status", {})
+
+        device.call_tool = AsyncMock(
+            return_value=(None, {"code": -32601, "message": "tool self.game.start not offered by device"})
+        )
+        result = await executor.execute("start_game", {"name": "catch"})
+        assert result == {"ok": False, "error": "tool self.game.start not offered by device"}
+    finally:
+        await executor.close()

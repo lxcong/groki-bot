@@ -37,6 +37,11 @@ Gemini ask_grokbot → optional localhost:18770 → gbot CLI → Grok Bot
 - 模型挂断（`end_the_call` / `end_conversation`）、8 秒无人说话或语音会话失效时，网关在再见语音播完后
   关闭设备的 WebSocket；上游固件只有在音频通道关闭后才回到待机并重新开启设备端唤醒词。
 - 设备在 `tools/list` 里没有的工具（触摸轮询、舵机、灯光）不再调用，避免设备日志刷 Unknown tool。
+- `STACKCHAN_GEMINI_DEVICE_TOOLS=1` 时，语音模型还拿到上游固件自带的设备工具：`get_device_status`、
+  `set_device_volume`（设备自己的扬声器音量）、`set_screen_brightness`、`set_screen_theme`，以及小乐板的
+  `start_game` / `stop_game`，对应 `self.audio_speaker.set_volume` 等 MCP 工具；「把音量调到 30」「调亮一点」
+  「换成深色」「玩抛接球」都能直接操作设备。要控制这台 Mac 的音乐播放和音量，再打开
+  `STACKCHAN_MAC_CONTROL=1`（网关要在终端里启动，第一次会弹出允许控制「音乐」的授权）。
 
 ### Grok Bot 0.72.0 登录态语音的实测说明
 
@@ -327,7 +332,10 @@ curl -s -X POST http://127.0.0.1:18770/send \
 | `STACKCHAN_GBOT_VOICE_BOT_ID` | 无 | Grok 语音智能体 ID，登录桥与网关必须一致 |
 | `STACKCHAN_GBOT_VOICE_URL` | `http://127.0.0.1:18771` | 仅本机 HTTP 登录桥地址 |
 | `STACKCHAN_GBOT_VOICE_LANGUAGE` | `zh` | 输入转写语言，如 `en` 或 `auto` |
-| `STACKCHAN_PERSONALITY_FILE` | 本目录的 `personality.md`（存在时） | 追加到 Gemini 指令后面的人设文字。内置人设很简短：名字叫 Groki，用用户说话的语言回答；这个文件里的内容和它不一致时（名字、语言、风格）以文件为准 |
+| `STACKCHAN_GBOT_VOICE_AGENT_NAME` | `Groki` | Grok 语音通话里机器人的名字；存在 `personality.md` 时，文件内容作为通话描述发给 Grok（它是谁、怎么说话） |
+| `STACKCHAN_GBOT_VOICE_USER_NAME` | 空 | 可选，Grok 通话里对说话人的称呼 |
+| `STACKCHAN_GBOT_VOICE_NAME` | 空（服务端默认，听感同 `ara`） | Grok 音色 id。`scripts/sample_gbot_voices.py` 可以用同一句话给每个音色生成 wav 试听；无效的 id 会静默回落到默认音色 |
+| `STACKCHAN_PERSONALITY_FILE` | 本目录的 `personality.md`（存在时） | 追加到 Gemini 指令后面、同时作为 Grok 语音通话描述的人设文字。内置人设很简短：名字叫 Groki，用用户说话的语言回答；这个文件里的内容和它不一致时（名字、语言、风格）以文件为准 |
 | `STACKCHAN_TOOL_BOT` | 空（关闭） | 目标智能体名字；启用 Grok 原生桌面联动，或 Gemini 的 `ask_grokbot` |
 | `STACKCHAN_TOOL_BOT_ID` | 空 | Grok 原生路径必填，须匹配 `STACKCHAN_GBOT_VOICE_BOT_ID`；Gemini 路径可选 |
 | `STACKCHAN_TOOL_BOT_PREFIX` | 内置的朗读提示 | 加在每个任务前面的文字；设为空则原样发送任务（仅 Gemini CLI 路径） |

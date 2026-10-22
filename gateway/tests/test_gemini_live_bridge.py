@@ -221,13 +221,25 @@ def fake_google_genai(monkeypatch):
     monkeypatch.setitem(sys.modules, "google.genai.types", types_mod)
 
 
+XIAOZHI_TOOLS = {
+    "get_device_status",
+    "set_device_volume",
+    "set_screen_brightness",
+    "set_screen_theme",
+    "start_game",
+    "stop_game",
+}
+
+
 def test_tool_map_covers_voice_backend_tools():
-    """Gemini-side public API: three physical control tools."""
+    """Gemini-side public API: three physical control tools plus the xiaozhi firmware tools."""
     assert set(TOOL_MAP) == {
         "move_head",
         "set_avatar",
         "set_all_leds",
-    }
+    } | XIAOZHI_TOOLS
+    assert TOOL_MAP["set_device_volume"] == "self.audio_speaker.set_volume"
+    assert TOOL_MAP["get_device_status"] == "self.get_device_status"
     assert TOOL_MAP["move_head"] == "self.robot.set_head_angles"
     assert TOOL_MAP["set_avatar"] == "self.display.set_avatar"
     assert TOOL_MAP["set_all_leds"] == "self.led.set_all"
@@ -238,7 +250,7 @@ def test_tool_map_unchanged():
         "move_head",
         "set_avatar",
         "set_all_leds",
-    }
+    } | XIAOZHI_TOOLS
     assert "set_background_color" not in TOOL_MAP
     assert "ask_claude" not in TOOL_MAP
     assert "get_current_datetime" not in TOOL_MAP
@@ -260,11 +272,17 @@ def test_build_function_declarations_match_tool_map():
 def test_build_function_declarations_includes_agent_tools():
     decls = build_function_declarations()
     names = [decl.name for decl in decls]
-    assert names[:7] == [
+    assert names[:13] == [
         "move_head",
         "set_avatar",
         "set_all_leds",
         "express_emotion",
+        "get_device_status",
+        "set_device_volume",
+        "set_screen_brightness",
+        "set_screen_theme",
+        "start_game",
+        "stop_game",
         "end_conversation",
         "ask_claude",
         "get_current_datetime",
@@ -353,7 +371,7 @@ def test_build_live_config_includes_system_instruction_and_tools():
     assert _modality_values(cfg.response_modalities) == ["AUDIO"]
     assert len(cfg.tools) == 2
     assert cfg.tools[0].google_search is not None
-    assert len(cfg.tools[1].function_declarations) == 18
+    assert len(cfg.tools[1].function_declarations) == 24
 
 
 def test_build_live_config_includes_google_search():
