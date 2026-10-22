@@ -54,6 +54,11 @@ gemini-live = [
     "google-genai>=2.0.1",
     "sounddevice>=0.5.5",
 ]
+# Music on the device's speaker (stackchan_mcp/music_player.py): PyAV decodes
+# local files and internet streams.
+music = [
+    "av>=14",
+]
 wakeword = [
     "numpy>=1.26",
     "sherpa-onnx==1.13.2",

@@ -93,6 +93,22 @@ def synthesize_wake_chime_pcm(
     return struct.pack(f"<{sample_count}h", *samples)
 
 
+class _MusicSink:
+    """Adapts the proxy's envelopes and Opus transport to music_player.MusicSink."""
+
+    def __init__(self, proxy: "GeminiVoiceProxy") -> None:
+        self._proxy = proxy
+
+    async def begin(self, title: str) -> bool:
+        return await self._proxy.music_begin(title)
+
+    async def send_pcm(self, pcm: bytes) -> bool:
+        return await self._proxy.music_send_pcm(pcm)
+
+    async def end(self) -> None:
+        await self._proxy.music_end()
+
+
 @dataclass
 class GeminiVoiceProxy:
     """Replace xiaozhi cloud with a Gemini Live session.
@@ -109,6 +125,9 @@ class GeminiVoiceProxy:
     voice_tool_executor: Any = None
     voice_tool_executor_factory: Any = None
     voice_tool_extensions: tuple = ()
+    music_player_factory: Callable[..., Any] | None = None  # tests inject a player
+    _music: Any = None
+    _music_speaking: bool = False  # the Speaking state belongs to the music, not a reply
     codec_factory: Callable[[], StackchanOpusCodec] | None = None
     edge_tts_provider_factory: Callable[..., EdgeTTSProvider] | None = None
     wake_gate_factory: Callable[[], WakeGate | None] | None = None
@@ -468,6 +487,8 @@ class GeminiVoiceProxy:
     async def stop(self) -> None:
         self._stopped = True
         self._tts_generation += 1
+        if self._music is not None:
+            await self._music.stop(quiet=True)
         if self._keepalive is not None:
             await self._keepalive.stop()
             self._keepalive = None
@@ -732,10 +753,107 @@ class GeminiVoiceProxy:
 
     _close_device_when_tts_ends = False
 
+    # ---- music on the device speaker (stackchan_mcp/music_player.py) ----------
+
+    def _music_extensions(self) -> tuple:
+        """The play_music / control_music tools, built once per proxy."""
+        from .music_player import MusicLibrary, MusicPlayer, build_music_extension, music_enabled
+
+        if self._music is None:
+            if not music_enabled():
+                return ()
+            sink = _MusicSink(self)
+            factory = self.music_player_factory or (
+                lambda sink: MusicPlayer(MusicLibrary.from_env(), sink)
+            )
+            self._music = factory(sink)
+        return (build_music_extension(self._music),)
+
+    def _music_hold(self) -> None:
+        if self._music is not None and self._music.playing:
+            self._music.hold()
+
+    def _music_release(self, *, stopped: bool) -> None:
+        if self._music is None:
+            return
+        if stopped:
+            self._music.notify_stopped()
+        self._music.release()
+
+    def _music_release_later(self, delay_s: float) -> None:
+        """After a barge-in with no reply, let the music go on."""
+        music = self._music
+        if music is None:
+            return
+
+        async def later() -> None:
+            await asyncio.sleep(delay_s)
+            if not self._tts_active and not self._stopped and music.playing:
+                self._music_release(stopped=False)
+
+        try:
+            asyncio.get_running_loop().create_task(later(), name="music-release")
+        except RuntimeError:
+            pass
+
+    async def music_begin(self, title: str) -> bool:
+        """``tts start`` + the title as subtitle; the device enters Speaking."""
+        if self._stopped or self._send_to_device is None:
+            return False
+        async with self._send_lock:
+            if self._tts_active:
+                return True  # already speaking (the model borrowed the speaker)
+            try:
+                await self._send_to_device(json.dumps({"type": "tts", "state": "start"}))
+                await self._send_to_device(
+                    json.dumps({"type": "tts", "state": "sentence_start", "text": f"♪ {title}"})
+                )
+            except Exception as exc:
+                logger.warning("music tts.start failed: %s", exc)
+                return False
+            self._tts_active = True
+            self._music_speaking = True
+            self._status.on_tts_state(True)
+            self._signal_speaking_avatar(self._speaking_avatar_face())
+            return True
+
+    async def music_send_pcm(self, pcm: bytes) -> bool:
+        if self._stopped or self._send_to_device is None or self._codec is None:
+            return False
+        frames = self._codec.encode_pcm_24k(pcm)
+        try:
+            async with self._send_lock:
+                for frame in frames:
+                    await self._send_to_device(frame)
+        except Exception as exc:
+            logger.warning("music frame send failed: %s", exc)
+            return False
+        return True
+
+    async def music_end(self) -> None:
+        if self._send_to_device is None:
+            return
+        if self._codec is not None:
+            self._codec.reset_encode_buffer()
+        async with self._send_lock:
+            if not self._tts_active or not self._music_speaking:
+                self._music_speaking = False
+                return
+            try:
+                await self._send_to_device(json.dumps({"type": "tts", "state": "stop"}))
+            except Exception as exc:
+                logger.debug("music tts.stop drop: %s", exc)
+            self._tts_active = False
+            self._music_speaking = False
+            self._status.on_tts_state(False)
+            self._signal_speaking_avatar("idle")
+
     async def _close_device_if_requested(self) -> None:
         if not self._close_device_when_tts_ends:
             return
         self._close_device_when_tts_ends = False
+        if self._music is not None:
+            await self._music.stop(quiet=True)
         close = getattr(self, "close_device", None)
         if close is None:
             return
@@ -963,6 +1081,8 @@ class GeminiVoiceProxy:
         now = asyncio.get_running_loop().time()
         if self._turn_rx_first is None:
             self._turn_rx_first = now
+            self._music_hold()
+            self._music_speaking = False  # the reply takes over the Speaking state
         elif self._turn_rx_last is not None:
             gap = now - self._turn_rx_last
             if gap > 0.24:  # device-side decode-queue tolerance
@@ -1329,6 +1449,11 @@ class GeminiVoiceProxy:
         Idempotent: a second call without intervening start is a no-op.
         """
         generation = self._tts_generation
+        if self._music_speaking and self._turn_rx_first is None:
+            # A tool-only turn while music plays: the Speaking state stays with the music.
+            self._clear_turn_emotion_face()
+            self._music_release(stopped=False)
+            return
         # Short turns may finish before the prebuffer threshold trips. Encode
         # whatever PCM we held back and push it onto the queue so the drain
         # task can ship it at the steady cadence.
@@ -1394,6 +1519,7 @@ class GeminiVoiceProxy:
             self._signal_speaking_avatar("idle")
             self._signal_speaking_leds(*self._post_tts_led_rgb())
             self._clear_turn_emotion_face()
+        self._music_release(stopped=True)
 
     async def _abort_in_flight_tts(self) -> None:
         """Drop in-flight TTS and tell the device to leave Speaking state.
@@ -1416,6 +1542,7 @@ class GeminiVoiceProxy:
             except Exception:
                 logger.exception("edge-tts abort failed")
         self._tts_active = False
+        self._music_speaking = False
         self._status.on_tts_state(False)
         self._prebuffer_satisfied = False
         self._pcm_prebuffer.clear()
@@ -1431,6 +1558,10 @@ class GeminiVoiceProxy:
         # A goodbye cut short by the line dropping still ends the conversation.
         await self._close_device_if_requested()
         self._clear_turn_emotion_face()
+        if self._music is not None and self._music.playing:
+            self._music_hold()
+            self._music.notify_stopped()
+            self._music_release_later(4.0)
 
     def _post_tts_led_rgb(self) -> tuple[int, int, int]:
         if self._reported_dead:

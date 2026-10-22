@@ -33,6 +33,6 @@ class GbotVoiceProxy(GeminiVoiceProxy):
             esp32=esp32,
             tool_executor=self.voice_tool_executor,
             tool_executor_factory=self.voice_tool_executor_factory,
-            tool_extensions=self.voice_tool_extensions,
+            tool_extensions=(*self.voice_tool_extensions, *self._music_extensions()),
             **kwargs,
         )
