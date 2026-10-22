@@ -58,7 +58,8 @@ GENERIC_WORDS = (
 class Track:
     title: str
     source: str  # file path or URL
-    stream: bool = False
+    stream: bool = False  # a live station: never ends, no "next" within it
+    online: bool = False  # found by the online search; not part of the library
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -71,6 +72,43 @@ def _env_flag(name: str, default: bool) -> bool:
 def music_enabled() -> bool:
     """STACKCHAN_MUSIC=0 turns the music tools off."""
     return _env_flag("STACKCHAN_MUSIC", True)
+
+
+def online_search_enabled() -> bool:
+    """STACKCHAN_MUSIC_ONLINE=0 keeps play_music to the local folder and the streams."""
+    return _env_flag("STACKCHAN_MUSIC_ONLINE", True)
+
+
+async def yt_dlp_search(query: str, *, timeout_s: float = 25.0) -> Track | None:
+    """Resolve a song by name to a playable audio URL with yt-dlp (first search hit)."""
+    import sys
+
+    argv = [
+        sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings", "--quiet",
+        "-f", "bestaudio[ext=m4a]/bestaudio/best", "--get-title", "--get-url",
+        f"ytsearch1:{query}",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning("online music search timed out: %s", query)
+        return None
+    except (OSError, ModuleNotFoundError) as exc:
+        logger.warning("online music search unavailable: %s", exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("online music search failed (%s): %s", proc.returncode, stderr.decode("utf-8", "replace").strip()[:200])
+        return None
+    lines = [line.strip() for line in stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+    if len(lines) < 2 or not lines[-1].startswith(("http://", "https://")):
+        return None
+    return Track(lines[0], lines[-1], stream=False, online=True)
+
+
+OnlineSearch = Callable[[str], Awaitable[Track | None]]
 
 
 def parse_streams(raw: str | None) -> list[Track]:
@@ -210,10 +248,12 @@ class MusicPlayer:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         autoplay_next: bool = True,
+        online_search: OnlineSearch | None = None,
     ) -> None:
         self.library = library
         self.sink = sink
         self.decoder = decoder
+        self.online_search = online_search
         self.queue_ahead_ms = queue_ahead_ms
         self.sleep = sleep
         self.clock = clock
@@ -244,6 +284,8 @@ class MusicPlayer:
 
     async def play(self, query: str) -> dict[str, Any]:
         track = self.library.find(query)
+        if track is None and self.online_search is not None and not _is_generic(_normalize(query or "")):
+            track = await self.online_search(query)
         if track is None:
             titles = [t.title for t in self.library.tracks()][:12]
             if not titles:
@@ -254,7 +296,7 @@ class MusicPlayer:
                 }
             return {"ok": False, "error": f"no track matches {query!r}", "available": titles}
         await self._start(track)
-        return {"ok": True, "title": track.title, "stream": track.stream}
+        return {"ok": True, "title": track.title, "stream": track.stream, "online": track.online}
 
     async def _start(self, track: Track) -> None:
         await self.stop(quiet=True)
@@ -305,7 +347,7 @@ class MusicPlayer:
     async def next(self) -> dict[str, Any]:
         if self.current is None:
             return await self.play("")
-        following = self.library.after(self.current)
+        following = self.library.after(self.current) if not self.current.online else self.library.find("")
         if following is None:
             return {"ok": False, "error": "no other track"}
         await self._start(following)
@@ -398,7 +440,11 @@ class MusicPlayer:
             if completed and self._stop_event is stop_event:
                 self._task = None
                 self._stop_event = None
-                following = self.library.after(track) if self.autoplay_next and not track.stream else None
+                following = (
+                    self.library.after(track)
+                    if self.autoplay_next and not track.stream and not track.online
+                    else None
+                )
                 self.current = None
                 if following is not None and self.last_error is None:
                     loop.create_task(self._start(following), name="music-autoplay")
@@ -408,7 +454,7 @@ class MusicPlayer:
 
 MUSIC_INSTRUCTION = """## Music
 
-You can play music on the device's own speaker. play_music(query) starts a track or station matched by name; an empty or vague request ("放点音乐", "play something") is an empty query. control_music(action) with pause, resume, stop, next or status controls playback. While music plays you keep listening: when the user talks, answer briefly and the music continues afterwards; "停" / "别放了" means stop. Say which track or station is playing in one short sentence."""
+Whenever the user asks for music or a song, call play_music(query): it plays on this device's own speaker, from the local music folder, the configured stations, or an online search by song and artist name. Pass the song or artist words the user said; an empty or vague request ("放点音乐", "play something") is an empty query. control_music(action) with pause, resume, stop, next or status controls playback. While music plays you keep listening: when the user talks, answer briefly and the music continues afterwards; "停" / "别放了" means stop. Say which track or station is playing in one short sentence; play_music may take a few seconds while it searches, so tell the user it is on its way."""
 
 
 def music_declarations() -> tuple[dict[str, Any], ...]:

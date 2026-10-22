@@ -757,14 +757,25 @@ class GeminiVoiceProxy:
 
     def _music_extensions(self) -> tuple:
         """The play_music / control_music tools, built once per proxy."""
-        from .music_player import MusicLibrary, MusicPlayer, build_music_extension, music_enabled
+        from .music_player import (
+            MusicLibrary,
+            MusicPlayer,
+            build_music_extension,
+            music_enabled,
+            online_search_enabled,
+            yt_dlp_search,
+        )
 
         if self._music is None:
             if not music_enabled():
                 return ()
             sink = _MusicSink(self)
             factory = self.music_player_factory or (
-                lambda sink: MusicPlayer(MusicLibrary.from_env(), sink)
+                lambda sink: MusicPlayer(
+                    MusicLibrary.from_env(),
+                    sink,
+                    online_search=yt_dlp_search if online_search_enabled() else None,
+                )
             )
             self._music = factory(sink)
         return (build_music_extension(self._music),)

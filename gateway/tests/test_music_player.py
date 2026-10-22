@@ -107,7 +107,7 @@ async def test_player_brackets_a_track_with_begin_and_end_and_paces_frames(tmp_p
     decoder = make_decoder([b"\0" * (CHUNK_BYTES * 3 + 10)])
     player = MusicPlayer(library, sink, decoder=decoder, queue_ahead_ms=120, sleep=sleep, clock=lambda: clock["now"], autoplay_next=False)
     result = await player.play("solo")
-    assert result == {"ok": True, "title": "solo", "stream": False}
+    assert result == {"ok": True, "title": "solo", "stream": False, "online": False}
     await player._task
     assert sink.events[0] == ("begin", "solo")
     assert [e for e in sink.events if e[0] == "pcm"] == [("pcm", CHUNK_BYTES)] * 3 + [("pcm", 10)]
@@ -274,3 +274,60 @@ async def test_proxy_brackets_music_and_lets_a_reply_borrow_the_speaker(monkeypa
     await sink.end()  # nothing left to stop: the reply already sent tts.stop
     assert sum(1 for m in sent if isinstance(m, str) and json.loads(m) == {"type": "tts", "state": "stop"}) == 1
     await proxy.stop()
+
+
+@pytest.mark.asyncio
+async def test_online_search_is_the_fallback_for_named_songs_only(tmp_path):
+    library = make_library(tmp_path, names=("alpha",))
+    sink = RecordingSink()
+    searched = []
+
+    async def no_sleep(_):
+        pass
+
+    async def search(query):
+        searched.append(query)
+        return Track("Golden (Official Video)", "https://example.invalid/golden.m4a", online=True) if "golden" in query.lower() else None
+
+    player = MusicPlayer(library, sink, decoder=make_decoder([b"\0" * CHUNK_BYTES]), sleep=no_sleep, online_search=search)
+    result = await player.play("Golden 的音乐")
+    assert result == {"ok": True, "title": "Golden (Official Video)", "stream": False, "online": True}
+    assert searched == ["Golden 的音乐"]
+    await wait_for(lambda: player.playing is False)
+    assert player.current is None  # an online song does not autoplay into the library
+    assert (await player.play("放点音乐"))["title"] == "alpha"  # generic: never searched online
+    assert searched == ["Golden 的音乐"]
+    await player.stop()
+    assert (await player.play("nonexistent zzz")) == {"ok": False, "error": "no track matches 'nonexistent zzz'", "available": ["alpha"]}
+    assert searched[-1] == "nonexistent zzz"
+
+
+@pytest.mark.asyncio
+async def test_yt_dlp_search_parses_title_and_url(monkeypatch):
+    from stackchan_mcp import music_player
+
+    class Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"Some Song (Official)\nhttps://example.invalid/a.m4a\n", b"")
+
+    async def fake_exec(*argv, **kwargs):
+        assert argv[-1] == "ytsearch1:some song" and "--get-url" in argv
+        return Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    track = await music_player.yt_dlp_search("some song")
+    assert track == Track("Some Song (Official)", "https://example.invalid/a.m4a", False, True)
+
+    class Failing(Proc):
+        returncode = 1
+
+        async def communicate(self):
+            return (b"", b"ERROR: no results")
+
+    async def failing_exec(*argv, **kwargs):
+        return Failing()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", failing_exec)
+    assert await music_player.yt_dlp_search("nothing") is None

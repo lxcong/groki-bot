@@ -1945,6 +1945,7 @@ music = [
     { name = "av", version = "17.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "yt-dlp" },
 ]
 tts = [
     { name = "httpx" },
@@ -1987,6 +1988,7 @@ requires-dist = [
     { name = "sounddevice", marker = "extra == 'gemini-live'", specifier = ">=0.5.5" },
     { name = "stackchan-mcp", extras = ["tts"], marker = "extra == 'tts-voicevox'" },
     { name = "websockets", specifier = ">=12" },
+    { name = "yt-dlp", marker = "extra == 'music'", specifier = ">=2025.1" },
 ]
 provides-extras = ["tts", "tts-voicevox", "gemini-live", "music", "wakeword"]
 
@@ -2332,4 +2334,13 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/19/3774d162f6732d1cfb0b47b4140a942a35ca82bb19b6db1f80e9e7bdc8f8/yarl-1.23.0-cp314-cp314t-win_amd64.whl", hash = "sha256:4503053d296bc6e4cbd1fad61cf3b6e33b939886c4f249ba7c78b602214fabe2", size = 97610, upload-time = "2026-03-01T22:07:45.773Z" },
     { url = "https://files.pythonhosted.org/packages/51/47/3fa2286c3cb162c71cdb34c4224d5745a1ceceb391b2bd9b19b668a8d724/yarl-1.23.0-cp314-cp314t-win_arm64.whl", hash = "sha256:44bb7bef4ea409384e3f8bc36c063d77ea1b8d4a5b2706956c0d6695f07dcc25", size = 86041, upload-time = "2026-03-01T22:07:49.026Z" },
     { url = "https://files.pythonhosted.org/packages/69/68/c8739671f5699c7dc470580a4f821ef37c32c4cb0b047ce223a7f115757f/yarl-1.23.0-py3-none-any.whl", hash = "sha256:a2df6afe50dea8ae15fa34c9f824a3ee958d785fd5d089063d960bae1daa0a3f", size = 48288, upload-time = "2026-03-01T22:07:51.388Z" },
+]
+
+[[package]]
+name = "yt-dlp"
+version = "2026.10.21"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/13/d2ea252871826205dc4965cb70e6037ab93697fcabf4feda49fe981f6da0/yt_dlp-2026.10.21.tar.gz", hash = "sha256:cbf748d7d17cd37647c4b9f07b6c25f24384bfd4361407ee5ec519e753d22539", size = 3057326, upload-time = "2026-10-21T21:54:53.563Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/75/ae700ddc7e0b1095fd06cf7e251627dcf4cafcaff460cce92cdc08023b13/yt_dlp-2026.10.21-py3-none-any.whl", hash = "sha256:94a3a3e2c423129d0bbd2f1be000c4171fa1226c29e251c84aff868f2851c247", size = 3188012, upload-time = "2026-10-21T21:54:50.808Z" },
 ]

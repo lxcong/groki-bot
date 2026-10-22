@@ -58,6 +58,7 @@ gemini-live = [
 # local files and internet streams.
 music = [
     "av>=14",
+    "yt-dlp>=2025.1",
 ]
 wakeword = [
     "numpy>=1.26",

@@ -45,7 +45,9 @@ Gemini ask_grokbot → optional localhost:18770 → gbot CLI → Grok Bot
 - 在设备自己的扬声器上放音乐：`play_music(query)` / `control_music(action)`（`uv sync --all-extras` 会装上解码用的
   PyAV）。曲目来自 `STACKCHAN_MUSIC_DIR`（默认 `~/Music/xiaole`）里的音频文件和 `STACKCHAN_MUSIC_STREAMS` 里的网络电台
   （默认几个 SomaFM 频道）。网关用和朗读一样的方式发送：`tts start`、字幕显示「♪ 曲名」、60 ms Opus 帧、`tts stop`；
-  放歌时设备仍在听，用户说话时小乐先回答，回答完音乐继续，说「停」就停。
+  放歌时设备仍在听，用户说话时小乐先回答，回答完音乐继续，说「停」就停。点名字的歌（「放 Golden」）在本地和电台
+  里找不到时，会用 yt-dlp 在线搜索第一条结果来播（`STACKCHAN_MUSIC_ONLINE=0` 关闭），搜索大约要 4 秒。
+  想让所有「放音乐」都落到设备上，就不要开 `STACKCHAN_MAC_CONTROL`，否则模型可能去控制 Mac 的音乐 App。
 
 ### Grok Bot 0.72.0 登录态语音的实测说明
 
@@ -326,6 +328,7 @@ curl -s -X POST http://127.0.0.1:18770/send \
 | `STACKCHAN_MUSIC` | 开 | 设为 `0` 时不提供在设备扬声器上放音乐的 `play_music` / `control_music` 工具 |
 | `STACKCHAN_MUSIC_DIR` | `~/Music/xiaole` | 本地音乐文件夹（mp3 / m4a / flac / wav / ogg），按文件名点歌 |
 | `STACKCHAN_MUSIC_STREAMS` | 三个 SomaFM 电台 | 网络电台列表，`名字=网址;名字=网址`；设为空字符串则不提供电台 |
+| `STACKCHAN_MUSIC_ONLINE` | 开 | 本地和电台都没有匹配时，用 yt-dlp 按歌名/歌手在线搜索第一条结果播放；设为 `0` 关闭 |
 | `STACKCHAN_FACE_TRACKER_AUTOSTART` | 开 | 设为 `0` 时不启动 Mac 人脸追踪程序（没有摄像头的电脑） |
 | `STACKCHAN_FACE_TRACKER_BIN` | `tools/vision-tracker/.build/release/groki-vision-tracker` | 人脸追踪程序的路径 |
 | `STACKCHAN_FACE_TRACKER_CAMERA` | 空 | 要用的摄像头名字里的一段；留空按追踪程序的默认顺序选 |
