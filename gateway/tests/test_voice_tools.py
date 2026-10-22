@@ -369,3 +369,15 @@ async def test_xiaozhi_device_tools_map_to_firmware_mcp_names_with_clamped_args(
         assert result == {"ok": False, "error": "tool self.game.start not offered by device"}
     finally:
         await executor.close()
+
+
+def test_device_tools_the_device_is_known_not_to_offer_are_not_declared():
+    """After one connection the executor remembers the device's tools/list."""
+    device = SimpleNamespace(device_connected=True, call_tool=AsyncMock(return_value=(True, None)))
+    names = {entry["name"] for entry in VoiceToolExecutor(device, mac_controller=SimpleNamespace()).declarations()}
+    assert {"move_head", "set_avatar", "set_device_volume"} <= names  # nothing known yet: everything stays
+
+    device.known_tool_names = {"self.audio_speaker.set_volume", "self.get_device_status", "self.game.start"}
+    names = {entry["name"] for entry in VoiceToolExecutor(device, mac_controller=SimpleNamespace()).declarations()}
+    assert {"set_device_volume", "get_device_status", "start_game", "express_emotion", "end_conversation"} <= names
+    assert not {"move_head", "set_avatar", "set_all_leds", "set_screen_brightness", "stop_game"} & names

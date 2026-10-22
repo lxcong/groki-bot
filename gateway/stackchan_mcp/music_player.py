@@ -454,7 +454,7 @@ class MusicPlayer:
 
 MUSIC_INSTRUCTION = """## Music
 
-Whenever the user asks for music or a song, call play_music(query): it plays on this device's own speaker, from the local music folder, the configured stations, or an online search by song and artist name. Pass the song or artist words the user said; an empty or vague request ("放点音乐", "play something") is an empty query. control_music(action) with pause, resume, stop, next or status controls playback. While music plays you keep listening: when the user talks, answer briefly and the music continues afterwards; "停" / "别放了" means stop. Say which track or station is playing in one short sentence; play_music may take a few seconds while it searches, so tell the user it is on its way."""
+Whenever the user asks for music or a song (放歌、放音乐、播放某首歌、来一首、听歌), call play_music(query) and nothing else: not send_task, not a game, not a Mac tool. It plays on this device's own speaker, from the local music folder, the configured stations, or an online search by song and artist name. Pass the song or artist words the user said; an empty or vague request ("放点音乐", "play something") is an empty query. control_music(action) with pause, resume, stop, next or status controls playback. While music plays you keep listening: when the user talks, answer briefly and the music continues afterwards; "停" / "别放了" means stop. Say which track or station is playing in one short sentence; play_music may take a few seconds while it searches, so tell the user it is on its way."""
 
 
 def music_declarations() -> tuple[dict[str, Any], ...]:
@@ -462,8 +462,9 @@ def music_declarations() -> tuple[dict[str, Any], ...]:
         {
             "name": "play_music",
             "description": (
-                "Play a track or station on the device's own speaker, matched by name; "
-                "an empty query picks something."
+                "Play music on this device's own speaker: a song, artist or station by name "
+                "(放歌 / 放音乐 / 播放 … / 来一首 / 听歌 / play …). Searches the local folder, the "
+                "stations and then online; an empty query picks something. The only tool for music."
             ),
             "parameters": {
                 "type": "OBJECT",

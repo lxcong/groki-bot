@@ -883,13 +883,31 @@ class VoiceToolExecutor:
 
     def declarations(self) -> list[dict[str, Any]]:
         return [
-            *self._declaration_provider(),
+            *self._offered_declarations(self._declaration_provider()),
             *(
                 entry
                 for extension in self._extensions
                 for entry in extension.declarations
             ),
         ]
+
+    def _offered_declarations(self, declarations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop device tools a connected device is known not to offer.
+
+        The voice session is built before the device's tools/list answers, so
+        the filter uses the list remembered from the device's last connection
+        (ESP32Manager.known_tool_names); with nothing known every tool stays.
+        """
+        known = getattr(self._esp32, "known_tool_names", None)
+        if not known:
+            return list(declarations)
+        kept = []
+        for entry in declarations:
+            target = TOOL_MAP.get(entry["name"])
+            if target is not None and target not in known:
+                continue
+            kept.append(entry)
+        return kept
 
     def instructions(self, *, model_search: bool = True) -> str:
         if self._instruction_provider is not None:

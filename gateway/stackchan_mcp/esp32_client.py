@@ -344,6 +344,9 @@ class ESP32Manager:
         self._server: Any = None
         self._lock = asyncio.Lock()
         self._init_tasks: list[asyncio.Task] = []
+        # tools/list of the last device that completed MCP initialization; the
+        # next voice session (built before tools/list answers) declares only these.
+        self.known_tool_names: set[str] = set()
         self._vision_url: str = ""
         self._vision_token: str = ""
         self.usb_transport = usb_transport
@@ -621,6 +624,10 @@ class ESP32Manager:
             vision_token=self._vision_token,
         ):
             await connection.discover_tools()
+            if connection.tools:
+                self.known_tool_names = {
+                    str(tool.get("name")) for tool in connection.tools if tool.get("name")
+                }
             logger.info(
                 "ESP32 ready: device=%s tools=%d",
                 device_id,
