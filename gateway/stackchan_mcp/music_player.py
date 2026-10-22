@@ -466,10 +466,12 @@ def music_declarations() -> tuple[dict[str, Any], ...]:
                 "(放歌 / 放音乐 / 播放 … / 来一首 / 听歌 / play …). Searches the local folder, the "
                 "stations and then online; an empty query picks something. The only tool for music."
             ),
+            # Plain JSON Schema (lowercase types, no "format"): Grok's realtime API
+            # ignores a tool whose schema it cannot parse.
             "parameters": {
-                "type": "OBJECT",
+                "type": "object",
                 "properties": {
-                    "query": {"type": "STRING", "description": "track, artist or station name; empty for any"},
+                    "query": {"type": "string", "description": "track, artist or station name; empty for any"},
                 },
             },
         },
@@ -477,11 +479,10 @@ def music_declarations() -> tuple[dict[str, Any], ...]:
             "name": "control_music",
             "description": "Control the music playing on the device: pause, resume, stop, next or status.",
             "parameters": {
-                "type": "OBJECT",
+                "type": "object",
                 "properties": {
                     "action": {
-                        "type": "STRING",
-                        "format": "enum",
+                        "type": "string",
                         "enum": ["pause", "resume", "stop", "next", "status"],
                         "description": "pause | resume | stop | next | status",
                     },

@@ -331,3 +331,18 @@ async def test_yt_dlp_search_parses_title_and_url(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", failing_exec)
     assert await music_player.yt_dlp_search("nothing") is None
+
+
+def test_music_declarations_are_plain_json_schema():
+    """Grok drops tools whose schema is not plain JSON Schema (uppercase types, format=enum)."""
+    from stackchan_mcp.music_player import music_declarations
+
+    def walk(schema):
+        assert schema.get("type") in {"object", "string", "integer", "number", "boolean", "array"}, schema
+        assert "format" not in schema
+        for child in schema.get("properties", {}).values():
+            walk(child)
+
+    for declaration in music_declarations():
+        walk(declaration["parameters"])
+
