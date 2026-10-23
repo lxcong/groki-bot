@@ -17,6 +17,7 @@ from aiohttp import web
 from aiohttp.web_log import AccessLogger
 
 from .capture_server import create_capture_app
+from .avatar import DEVICE_GET_TOOL, avatar_dir
 from .cloud_proxy import CloudProxy, DEFAULT_CLOUD_URL
 from .device_emotion import IDLE_EMOTION, LISTENING_EMOTION, face_to_device_emotion
 from .demo_reactions import DemoReactions
@@ -289,6 +290,19 @@ class Gateway:
 
         outcome = await sync_device_persona(esp32)
         logger.info("persona sync with %s: %s", device_id, outcome)
+        if DEVICE_GET_TOOL in getattr(esp32, "known_tool_names", set()):
+            try:
+                result, error = await esp32.call_tool(DEVICE_GET_TOOL, {})
+            except Exception as exc:  # pragma: no cover - transport failure
+                logger.info("avatar check with %s failed: %s", device_id, exc)
+                return
+            from .avatar import adopt_device_avatar  # noqa: PLC0415
+            from .persona import current_persona, default_store, parse_device_persona  # noqa: PLC0415
+
+            shown = parse_device_persona(result) if not error else None
+            expected = (current_persona().avatar_pack or {}).get("id")
+            verdict = adopt_device_avatar(default_store(), shown)
+            logger.info("avatar on %s: %s (persona.json expected %s): %s", device_id, shown, expected or "builtin", verdict)
 
     async def _set_face_tracking_from_voice(self, enabled: bool) -> dict:
         return await self._handle_external_local_tool("set_face_tracking", {"enabled": enabled})
@@ -383,6 +397,7 @@ class Gateway:
             ota_ws_port=ws_port,
             ota_ws_url=os.getenv("STACKCHAN_OTA_WS_URL", ""),
             ota_token=os.getenv("STACKCHAN_TOKEN", ""),
+            avatar_dir=str(avatar_dir()),
         )
         app.router.add_post("/track", self._handle_track)
         app.router.add_post("/demo/intro", self._handle_demo_intro)

@@ -62,6 +62,38 @@ MCP 工具 `self.persona.set_name`，设备当场把唤醒词换成新名字并�
 只在还没有 `persona.json` 时生效）。所以改名在**下一通对话**才完全生效，当前这通只是口头确认。
 设备每次连上来网关都会对账：还没有 `persona.json` 时采用设备上的名字；有了以后以文件为准推给设备。
 
+### 用一句话给小乐换个样子（形象包，可反复预览）
+
+小乐的 21 个表情由工作区 `assets/xiaole/generate.py` 按一份 spec 画出来（物种、耳朵、颜色、花纹、
+配饰、眼睛风格），固件从 assets 分区里的“形象包”取帧（板型 README“形象”一节）。改样子是一轮轮来的：
+
+1. `design_avatar(description, mode, spec)`：用户说「把你变成一只戴眼镜的橘猫」时，模型用 `mode=new`
+   按工具里的 schema 把描述填成 spec（没提到的用物种默认值）；网关渲染 21 帧、把包和 contact sheet 写到
+   `avatars/<id>/`（`STACKCHAN_AVATAR_DIR`），然后调设备的 `self.avatar.preview(url)`：设备把 86 KB 的包
+   下到内存、**当场换成这个样子动起来**（不写分区），模型用 `spoken` 说明画了什么、请用户继续改。
+   「耳朵再长一点」「换成蓝围巾」「去掉眼镜」→ `mode=adjust` 只传改动的字段（`accessories` 整体替换），
+   「回到上一个」→ `mode=back`。每一版都在设备上实时预览；结果里的 `preview_url`
+   （`/xiaozhi/avatars/<id>.png`）是 contact sheet，手机或浏览器可看。预览在 `discard_avatar_draft`、
+   `self.avatar.preview_end`、对话结束后 3 秒或 10 分钟后自动退回原来的样子。
+2. `apply_avatar()`：只在用户明确拍板（「就这个了」「换吧」）时才调，模型不得自行调用。网关用固件的
+   `scripts/build_default_assets.configure_assets_models` 把包、现有 MultiNet 模型和当前命令词（基准镜像
+   `artifacts/xiaole-motion/xiaole-assets.bin` 的 `multinet_model`，`STACKCHAN_ASSETS_BASE_IMAGE` 可换）
+   打成不超过 9 MB 的 assets 镜像，存到 `avatars/images/<sha>.bin`，调设备 MCP 工具 `self.avatar.update(url)`；
+   设备答复后 1.5 秒重启，开机下载（局域网约 70 KB/s、约 100 秒）、校验、Apply，带着新形象回来。
+   设备接受后才写 `persona.json`（`appearance` 文本、`avatar_spec`、`avatar_pack`），下一通对话的
+   指令里加一句「你刚换了新样子」让模型开口报一声。设备每次连上来网关还会用 `self.avatar.get` 对账：
+   设备画的是本网关生成过的包而 `persona.json` 不是它时，就采用那个设计。名字和唤醒词在设备 NVS `persona`
+   里，重刷 assets 不变。
+3. `discard_avatar_draft()`：「不换了」「算了」→ 结束预览、丢掉草稿。
+
+下载地址 `GET /xiaozhi/assets/<sha>.bin`（镜像）和 `GET /xiaozhi/assets/<id>.bin`（预览用的包）在 8766 端口
+的 OTA 服务上，`tunnel_guard` 对 `/xiaozhi/assets/`、`/xiaozhi/avatars/` 放行（文件名是哈希，没有秘密）；
+主机名默认取设备最近一次 OTA 请求用的地址（走隧道时是 https），`STACKCHAN_ASSETS_BASE_URL` 可以指定
+（镜像有 6.5 MB，设备在家时建议指到局域网地址）。工作区位置默认是本仓库所在目录，`STACKCHAN_XIAOLE_WORKSPACE`
+可换。只有设备的 tools/list 里有 `self.avatar.update` 时才声明这些工具（老固件看不到）。
+手动试：`python assets/xiaole/export_pack.py spec.json out.bin --sheet sheet.png` 看预览，
+`tools/xiaole-sim --avatar out.bin` 在模拟器里看动画。
+
 ### Grok Bot 0.72.0 登录态语音的实测说明
 
 - 登录桥必须在**你自己的终端**里启动：它用 `security` 读钥匙串里的「Grok Bot Safe Storage」，

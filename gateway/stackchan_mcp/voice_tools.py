@@ -125,6 +125,11 @@ TOOL_MAP: dict[str, str] = {
     # Dispatched by _dispatch_rename (pinyin + persona.json), listed here so a
     # device without the persona tools does not get the declaration.
     "rename_assistant": "self.persona.set_name",
+    # Dispatched by _dispatch_design_avatar / _dispatch_apply_avatar (stackchan_mcp.avatar);
+    # only a device with the avatar update tool gets them.
+    "design_avatar": "self.avatar.update",
+    "apply_avatar": "self.avatar.update",
+    "discard_avatar_draft": "self.avatar.update",
 }
 
 XIAOZHI_DEVICE_TOOL_NAMES = frozenset(
@@ -136,6 +141,9 @@ XIAOZHI_DEVICE_TOOL_NAMES = frozenset(
         "start_game",
         "stop_game",
         "rename_assistant",
+        "design_avatar",
+        "apply_avatar",
+        "discard_avatar_draft",
     }
 )
 
@@ -192,6 +200,9 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
     "start_game": ToolMetadata(True, "device", 5.0),
     "stop_game": ToolMetadata(True, "device", 5.0),
     "rename_assistant": ToolMetadata(True, "device", 10.0),
+    "design_avatar": ToolMetadata(True, "avatar", 25.0),
+    "apply_avatar": ToolMetadata(True, "avatar", 40.0),
+    "discard_avatar_draft": ToolMetadata(True, "avatar", 10.0),
     "end_conversation": ToolMetadata(True, "conversation", 5.0),
     "ask_grokbot": ToolMetadata(False, None, 8.0),
     "ask_claude": ToolMetadata(False, None, 35.0),
@@ -489,6 +500,8 @@ def build_function_declarations(*, types=None) -> list[Any]:
         ),
     )
 
+    avatar_tools = _build_avatar_declarations(types)
+
     device = (
         [
             move_head,
@@ -502,6 +515,7 @@ def build_function_declarations(*, types=None) -> list[Any]:
             start_game,
             stop_game,
             rename_assistant,
+            *avatar_tools,
         ]
         if device_tools_enabled()
         else []
@@ -523,6 +537,67 @@ def build_function_declarations(*, types=None) -> list[Any]:
         *tracking,
         *mac,
     ]
+
+
+def _plain_schema(types: Any, schema: dict[str, Any]) -> Any:
+    """Rebuild a JSON schema through ``types.Schema`` so provider quirks apply at every level."""
+    values = dict(schema)
+    if "properties" in values:
+        values["properties"] = {key: _plain_schema(types, sub) for key, sub in values["properties"].items()}
+    if "items" in values:
+        values["items"] = _plain_schema(types, values["items"])
+    return types.Schema(**values)
+
+
+def _build_avatar_declarations(types: Any) -> list[Any]:
+    """design_avatar / apply_avatar when the generator and a base assets image exist."""
+    from . import avatar as _avatar  # noqa: PLC0415
+
+    if not _avatar.available():
+        return []
+    schema = _avatar.spec_schema()
+    if schema is None:
+        return []
+    design_avatar = types.FunctionDeclaration(
+        name="design_avatar",
+        description=(
+            "Draw a draft of a new look and show it live on the device screen (nothing is installed). "
+            "mode `new`: start a look from the user's description, filling `spec` from it (species, ears, "
+            "colours, pattern, accessories, eye style; colours as #rrggbb or a common colour name; leave out "
+            "what they did not mention). mode `adjust`: change the current draft, passing in `spec` only the "
+            "fields to change (`accessories` is replaced as a whole, so repeat the ones to keep). mode `back`: "
+            "return to the previous draft (`spec` may be empty). The result's `spec` is the full current draft, "
+            "`look` describes it, `spoken` is what to say. Call it as often as the user wants changes."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "description": types.Schema(type="STRING", description="the user's words for this change"),
+                "mode": types.Schema(type="STRING", enum=["new", "adjust", "back"], description="new | adjust | back"),
+                "spec": _plain_schema(types, schema),
+            },
+            required=["description", "mode"],
+        ),
+    )
+    apply_avatar = types.FunctionDeclaration(
+        name="apply_avatar",
+        description=(
+            "Install the current draft for good. Call it ONLY when the user says the draft is final "
+            "(this one, go ahead and change), never on your own initiative and never as part of design_avatar. "
+            "The device downloads the look and reboots (about two minutes); this call ends then. Your "
+            "name and wake word stay the same. Say only the result's `spoken`."
+        ),
+        parameters=types.Schema(type="OBJECT", properties={}),
+    )
+    discard_avatar_draft = types.FunctionDeclaration(
+        name="discard_avatar_draft",
+        description=(
+            "Drop the draft and show the installed look again, when the user says they do not want to "
+            "change after all (never mind, keep the old look)."
+        ),
+        parameters=types.Schema(type="OBJECT", properties={}),
+    )
+    return [design_avatar, apply_avatar, discard_avatar_draft]
 
 
 def _build_mac_declarations(types: Any) -> list[Any]:
@@ -739,6 +814,16 @@ RENAME_INSTRUCTION = """## Your name
 The user can rename you: when they clearly say a new name for you (以后叫你X / 给你改名叫X), call rename_assistant(name) with just that name. The device then wakes to the new name and the next conversation speaks as it. Say only the result's `spoken`; if it refused, ask for another name. Do not rename yourself on a passing mention or a joke; when unsure, ask once."""
 
 
+AVATAR_INSTRUCTION = """## Your look
+
+The user can redesign how you look, in several rounds, and sees each draft live on the device screen:
+- When they describe a new look (把你变成一只橘色的小猫 / 换个样子 / 戴顶帽子), call design_avatar(mode="new", description, spec) with a spec built from their words only.
+- When they want a change to the draft (耳朵再长一点 / 换成蓝色围巾 / 去掉眼镜), call design_avatar(mode="adjust", description, spec) with just the changed fields; for 回到上一个 / 还是刚才那个 use mode="back".
+- After every design_avatar say its `spoken` (it describes the draft on the screen) and invite more changes; do not ask "shall I apply it".
+- Call apply_avatar() only when the user says the draft is final (就这个了 / 就用这个 / 换吧 / 定了). Never call it on your own, never right after design_avatar, and never when they merely say the draft looks nice. If they say 不换了 / 算了, call discard_avatar_draft().
+- Do not redesign on a passing remark; when unsure what they meant, ask once."""
+
+
 VOICE_ONLY_SYSTEM_INSTRUCTION = """## Speak first
 
 In small talk, answer out loud right away.
@@ -886,6 +971,10 @@ class VoiceToolExecutor:
                 self._extension_routes[name] = extension
             self._extension_metadata.update(extension.metadata)
         self._current_turn_emotion_face = None
+        self._avatar_drafts = []     # design_avatar history (PendingDesign), oldest first
+        self._avatar_index = -1      # the draft shown on the device, -1 = none
+        self._avatar_preview_live = False  # the device is drawing a draft (self.avatar.preview)
+        self._avatar_designer = None
         self._emotion_tasks = set()
         self._background_tasks = set()
         self._active_executions = {}
@@ -952,6 +1041,11 @@ class VoiceToolExecutor:
                 parts.append(DEVICE_CONTROL_INSTRUCTION)
             if "rename_assistant" in names:
                 parts.append(RENAME_INSTRUCTION)
+            if "design_avatar" in names:
+                parts.append(AVATAR_INSTRUCTION)
+                announcement = self._avatar_announcement()
+                if announcement:
+                    parts.append(announcement)
             bot = tool_bot() if "ask_grokbot" in names else ""
             mac_enabled = bool(names & MAC_TOOL_NAMES)
             if bot:
@@ -1039,6 +1133,7 @@ class VoiceToolExecutor:
         return task
 
     async def close(self):
+        await self._end_avatar_preview_quietly()
         self._tools_closed = True
         current = asyncio.current_task()
         owner = self._execution_owner.get()
@@ -1211,6 +1306,12 @@ class VoiceToolExecutor:
             return self._dispatch_get_datetime()
         if name == "rename_assistant":
             return await self._dispatch_rename(args)
+        if name == "design_avatar":
+            return await self._dispatch_design_avatar(args)
+        if name == "apply_avatar":
+            return await self._dispatch_apply_avatar()
+        if name == "discard_avatar_draft":
+            return await self._dispatch_discard_avatar_draft()
         if name in {"self.tracking.start", "self.tracking.stop"}:
             if self._set_face_tracking is None:
                 return {"ok": False, "error": "face tracking unavailable"}
@@ -1591,6 +1692,205 @@ class VoiceToolExecutor:
             "name": name,
             "wake_pinyin": pinyin,
             "spoken": f"好啦，从现在起我就叫{name}，想叫我的时候喊一声{name}就行。下次聊天我就完全是{name}啦！",
+        }
+
+    # -- a new look (stackchan_mcp.avatar) ---------------------------------------------
+
+    @staticmethod
+    def _avatar_announcement() -> str:
+        """One-time note for the session right after a new look was applied."""
+        from . import persona as persona_mod  # noqa: PLC0415
+
+        try:
+            appearance = persona_mod.default_store().take_avatar_announcement()
+        except Exception:  # pragma: no cover - persona.json unreadable
+            logger.exception("avatar announcement failed")
+            return ""
+        if not appearance:
+            return ""
+        return (
+            "## New look\n\n"
+            f"You just changed into a new look: {appearance}. At the start of this call, before anything "
+            "else, tell the user in one happy sentence that you are wearing your new look now and ask how it "
+            "looks; then carry on normally."
+        )
+
+    def _designer(self):
+        if self._avatar_designer is None:
+            from .avatar import AvatarDesigner  # noqa: PLC0415
+
+            self._avatar_designer = AvatarDesigner()
+        return self._avatar_designer
+
+    @property
+    def _avatar_draft(self):
+        return self._avatar_drafts[self._avatar_index] if 0 <= self._avatar_index < len(self._avatar_drafts) else None
+
+    def _device_offers(self, tool: str) -> bool:
+        known = getattr(self._esp32, "known_tool_names", None)
+        return not known or tool in known
+
+    async def _preview_on_device(self, pending) -> tuple[bool, str]:
+        """Show the draft live on the device; (shown, note)."""
+        from .avatar import DEVICE_PREVIEW_TOOL, pack_url  # noqa: PLC0415
+        from .capture_server import last_ota_origin  # noqa: PLC0415
+
+        if not getattr(self._esp32, "device_connected", False):
+            return False, "device offline"
+        if not self._device_offers(DEVICE_PREVIEW_TOOL):
+            return False, "device has no preview tool"
+        url = pack_url(pending.id, last_ota_origin())
+        if not url:
+            return False, "no download url"
+        try:
+            result, error = await self._esp32.call_tool(DEVICE_PREVIEW_TOOL, {"url": url})
+        except Exception as exc:  # pragma: no cover - transport failure
+            return False, str(exc)
+        if error:
+            return False, str(error.get("message", error)) if isinstance(error, dict) else str(error)
+        from . import persona as persona_mod  # noqa: PLC0415
+
+        failed = persona_mod.device_set_failed(result)
+        if failed:
+            return False, failed
+        self._avatar_preview_live = True
+        return True, url
+
+    async def _end_avatar_preview_quietly(self) -> None:
+        """Best effort: the device also reverts by itself when the conversation ends."""
+        if not self._avatar_preview_live:
+            return
+        self._avatar_preview_live = False
+        from .avatar import DEVICE_PREVIEW_END_TOOL  # noqa: PLC0415
+
+        if not getattr(self._esp32, "device_connected", False) or not self._device_offers(DEVICE_PREVIEW_END_TOOL):
+            return
+        try:
+            await asyncio.wait_for(self._esp32.call_tool(DEVICE_PREVIEW_END_TOOL, {}), timeout=3.0)
+        except Exception:  # noqa: BLE001
+            logger.debug("avatar preview_end failed", exc_info=True)
+
+    async def _dispatch_design_avatar(self, args: dict[str, Any]) -> dict[str, Any]:
+        """design_avatar: new / adjust / back on the draft history, then preview on the device."""
+        from .avatar import load_generator, merge_spec, sheet_url  # noqa: PLC0415
+        from .capture_server import last_ota_origin  # noqa: PLC0415
+
+        description = str(args.get("description") or "").strip()
+        mode = str(args.get("mode") or "").strip().lower()
+        changes = args.get("spec") if isinstance(args.get("spec"), dict) else {}
+        current = self._avatar_draft
+        if mode not in {"new", "adjust", "back"}:
+            mode = "adjust" if current else "new"
+        try:
+            generator = load_generator()
+        except FileNotFoundError as exc:
+            return {"ok": False, "error": str(exc), "spoken": "画画的工具不在，让主人检查一下网关吧。"}
+        if mode == "back":
+            if self._avatar_index <= 0:
+                return {"ok": False, "error": "no earlier draft",
+                        "spoken": "这已经是第一版啦，没有更早的了。想改哪里直接说吧。"}
+            self._avatar_index -= 1
+            pending = self._avatar_drafts[self._avatar_index]
+            shown, note = await self._preview_on_device(pending)
+            return self._design_result(pending, shown, note, sheet_url(pending.id, last_ota_origin()),
+                                       f"回到上一个啦：{pending.look}。")
+        if mode == "adjust" and current is None:
+            mode = "new"
+        spec = merge_spec(current.spec, changes) if mode == "adjust" else changes
+        try:
+            pending = await asyncio.to_thread(self._designer().design, spec, description)
+        except generator.SpecError as exc:
+            return {"ok": False, "error": exc.reason, "spoken": exc.spoken}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("design_avatar failed")
+            return {"ok": False, "error": str(exc), "spoken": "呜，这个样子我画着画着出错了，换个说法再试试？"}
+        if mode == "new":
+            self._avatar_drafts = [pending]
+        else:
+            del self._avatar_drafts[self._avatar_index + 1:]
+            self._avatar_drafts.append(pending)
+        self._avatar_index = len(self._avatar_drafts) - 1
+        shown, note = await self._preview_on_device(pending)
+        if mode == "new":
+            spoken = f"画好啦，看看屏幕上的我：{pending.look}。想改哪儿尽管说，比如耳朵长一点、换个颜色；满意了就说「就这个了」。"
+        else:
+            spoken = f"改好啦：{pending.look}。还要再改吗？满意了就说「就这个了」。"
+        if not shown:
+            spoken += "屏幕上暂时显示不了预览，我先口头说给你听。"
+        return self._design_result(pending, shown, note, sheet_url(pending.id, last_ota_origin()), spoken)
+
+    def _design_result(self, pending, shown: bool, note: str, preview_url, spoken: str) -> dict[str, Any]:
+        if shown:
+            logger.info("design_avatar: draft %s shown on the device (%s)", pending.id, note)
+        else:
+            logger.warning("design_avatar: draft %s not shown on the device: %s", pending.id, note)
+        return {
+            "ok": True,
+            "id": pending.id,
+            "look": pending.look,
+            "spec": pending.spec,
+            "draft": self._avatar_index + 1,
+            "drafts": len(self._avatar_drafts),
+            "preview_on_device": shown,
+            "preview_note": "" if shown else note,
+            "preview_url": preview_url or "",
+            "contact_sheet": str(pending.sheet),
+            "spoken": spoken,
+        }
+
+    async def _dispatch_discard_avatar_draft(self) -> dict[str, Any]:
+        had = self._avatar_draft is not None
+        await self._end_avatar_preview_quietly()
+        self._avatar_drafts = []
+        self._avatar_index = -1
+        return {"ok": True, "discarded": had,
+                "spoken": "好，那就先不换啦，还是原来的我。" if had else "现在没有在画的新样子呀，想换的时候告诉我。"}
+
+    async def _dispatch_apply_avatar(self) -> dict[str, Any]:
+        """apply_avatar: build the assets image, tell the device to fetch it, save persona.json."""
+        from . import persona as persona_mod  # noqa: PLC0415
+        from .avatar import DEVICE_UPDATE_TOOL, appearance_text, assets_url, prune_old_designs  # noqa: PLC0415
+        from .capture_server import last_ota_origin  # noqa: PLC0415
+
+        pending = self._avatar_draft
+        if pending is None:
+            return {"ok": False, "error": "no pending design", "spoken": "先告诉我你想让我变成什么样子，我画给你看了再换。"}
+        if not getattr(self._esp32, "device_connected", False):
+            return {"ok": False, "error": "device offline", "spoken": "小机器这会儿没连上，等它在线了再换样子吧。"}
+        try:
+            build = await asyncio.to_thread(self._designer().build, pending)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("apply_avatar build failed")
+            return {"ok": False, "error": str(exc), "spoken": "呜，新样子打包的时候出错了，让主人看看网关的日志吧。"}
+        url = assets_url(build.file_name, last_ota_origin())
+        if not url:
+            return {"ok": False, "error": "no download url: set STACKCHAN_ASSETS_BASE_URL or let the device do an OTA check first",
+                    "spoken": "我还不知道小机器从哪儿下载新样子，让主人设一下网关地址吧。"}
+        try:
+            result, error = await self._esp32.call_tool(DEVICE_UPDATE_TOOL, {"url": url})
+        except Exception as exc:  # pragma: no cover - transport failure
+            return {"ok": False, "error": str(exc), "spoken": "小机器没回应，等会儿再试一次吧。"}
+        if error:
+            message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+            return {"ok": False, "error": message, "spoken": "小机器不肯换，让主人看看固件版本吧。"}
+        failed = persona_mod.device_set_failed(result)
+        if failed:
+            return {"ok": False, "error": failed, "spoken": "小机器说这个地址它不认，让主人检查一下网关地址吧。"}
+        store = persona_mod.default_store()
+        store.set_avatar(appearance_text(pending.spec, pending.look), pending.spec, {**build.as_record(), "url": url})
+        self._avatar_drafts = []
+        self._avatar_index = -1
+        self._avatar_preview_live = False  # the device reboots into the new look
+        designer = self._designer()
+        designer.prune({build.file_name})
+        prune_old_designs(designer.root, {build.id})
+        logger.info("apply_avatar: %s (%s) -> %s", build.id, build.look, url)
+        return {
+            "ok": True,
+            "id": build.id,
+            "url": url,
+            "image_size": build.image_size,
+            "spoken": "好嘞，我去换上新样子啦！重启一下，下载大概要两分钟，好了你再叫我哦。",
         }
 
     @staticmethod

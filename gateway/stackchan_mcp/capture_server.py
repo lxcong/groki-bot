@@ -14,7 +14,9 @@ import inspect
 import json
 import logging
 import os
+import re
 import time
+from pathlib import Path
 from collections.abc import Awaitable, Callable
 
 from aiohttp import web
@@ -35,6 +37,29 @@ DEBUG_STATUS_KEY = web.AppKey("debug_status", DebugStatus)
 OTA_WS_PORT_KEY = web.AppKey("ota_ws_port", int)
 OTA_WS_URL_KEY = web.AppKey("ota_ws_url", str)
 OTA_TOKEN_KEY = web.AppKey("ota_token", str)
+AVATAR_DIR_KEY = web.AppKey("avatar_dir", str)
+# Assets images (speech models + avatar pack) are named by their hash and carry
+# no secret, so the device may fetch them from outside too.
+TUNNEL_ALLOWED_PREFIXES = ("/xiaozhi/assets/", "/xiaozhi/avatars/")
+ASSET_FILE_NAME = re.compile(r"^[0-9a-f]{16,64}\.bin$")
+DESIGN_ID = re.compile(r"^[0-9a-f]{16}$")
+
+# Where the device last reached us (scheme + host[:port]); the avatar tool builds
+# the download URL it hands the device from this.
+_last_ota_origin: dict[str, str] = {}
+
+
+def last_ota_origin() -> str | None:
+    return _last_ota_origin.get("origin")
+
+
+def remember_ota_origin(request: web.Request) -> None:
+    host = request.host or ""
+    if not host:
+        return
+    # Cloudflare adds CF-Connecting-IP to every request it forwards (see is_tunnel_request).
+    via_tunnel = bool(request.headers.get("CF-Connecting-IP") or request.headers.get("Cf-Connecting-Ip"))
+    _last_ota_origin["origin"] = f"{'https' if via_tunnel else 'http'}://{host}"
 
 
 def _is_authorized(auth_header: str, expected_token: str) -> bool:
@@ -195,6 +220,7 @@ async def handle_xiaozhi_ota(request: web.Request) -> web.Response:
                 device_version = application["version"]
         except (json.JSONDecodeError, UnicodeDecodeError):
             device_version = None
+    remember_ota_origin(request)
     websocket_url = request.app.get(OTA_WS_URL_KEY) or (
         f"ws://{_ota_host(request)}:{request.app.get(OTA_WS_PORT_KEY, 8765)}/"
     )
@@ -213,6 +239,43 @@ async def handle_xiaozhi_ota(request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+async def handle_xiaozhi_assets(request: web.Request) -> web.StreamResponse:
+    """``/xiaozhi/assets/<sha>.bin``: an assets image built by the avatar tool.
+
+    The firmware's Assets::Download needs a Content-Length and a 200; aiohttp's
+    FileResponse provides both. Names are hashes, so there is nothing to guess
+    and no path to traverse.
+    """
+    name = request.match_info.get("name", "")
+    root = request.app.get(AVATAR_DIR_KEY, "")
+    if not root or not ASSET_FILE_NAME.match(name):
+        return web.json_response({"error": "Not found"}, status=404)
+    path = Path(root) / "images" / name
+    is_pack = False
+    if not path.is_file() and DESIGN_ID.match(name[:-4]):
+        path = Path(root) / name[:-4] / "avatar.bin"  # a design's pack, for the live preview
+        is_pack = True
+    if not path.is_file():
+        return web.json_response({"error": "Not found"}, status=404)
+    logger.info("assets download %s (%d bytes) by device=%s", name, path.stat().st_size, request.headers.get("Device-Id", "?"))
+    if is_pack:
+        # Small (~86 KB) and fetched while the device streams audio: send it as one
+        # in-memory body with an explicit close, not through the sendfile path.
+        return web.Response(body=path.read_bytes(),
+                            headers={"Content-Type": "application/octet-stream", "Connection": "close", "Cache-Control": "no-store"})
+    return web.FileResponse(path, headers={"Content-Type": "application/octet-stream"})
+
+
+async def handle_xiaozhi_avatar_sheet(request: web.Request) -> web.StreamResponse:
+    """``/xiaozhi/avatars/<id>.png``: the contact sheet of a design, for a phone or browser."""
+    name = request.match_info.get("name", "")
+    root = request.app.get(AVATAR_DIR_KEY, "")
+    if not root or not name.endswith(".png") or not DESIGN_ID.match(name[:-4]):
+        return web.json_response({"error": "Not found"}, status=404)
+    path = Path(root) / name[:-4] / "contact-sheet.png"
+    if not path.is_file():
+        return web.json_response({"error": "Not found"}, status=404)
+    return web.FileResponse(path, headers={"Content-Type": "image/png", "Cache-Control": "no-store"})
 def create_capture_app(
     capture_token: str = "",
     *,
@@ -221,9 +284,11 @@ def create_capture_app(
     ota_ws_port: int = 8765,
     ota_ws_url: str = "",
     ota_token: str = "",
+    avatar_dir: str = "",
 ) -> web.Application:
     """Create the HTTP capture application."""
     app = web.Application()
+    app[AVATAR_DIR_KEY] = avatar_dir
     app[CAPTURE_TOKEN_KEY] = capture_token
     app[INJECT_TEXT_HANDLER_KEY] = inject_text_handler
     app[DEBUG_STATUS_KEY] = debug_status or get_debug_status()
@@ -237,4 +302,6 @@ def create_capture_app(
     for path in ("/xiaozhi/ota/", "/xiaozhi/ota"):
         app.router.add_get(path, handle_xiaozhi_ota)
         app.router.add_post(path, handle_xiaozhi_ota)
+    app.router.add_get("/xiaozhi/assets/{name}", handle_xiaozhi_assets)
+    app.router.add_get("/xiaozhi/avatars/{name}", handle_xiaozhi_avatar_sheet)
     return app

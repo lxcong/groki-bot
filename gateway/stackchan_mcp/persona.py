@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,12 @@ class Persona:
     wake_word: str = DEFAULT_NAME
     wake_pinyin: str = DEFAULT_WAKE_PINYIN
     appearance: str = DEFAULT_APPEARANCE
+    # The look the user designed in a conversation (stackchan_mcp.avatar): the
+    # normalised spec, the built pack/image record, and whether the next call
+    # should mention the new look once.
+    avatar_spec: dict[str, Any] | None = field(default=None)
+    avatar_pack: dict[str, Any] | None = field(default=None)
+    avatar_announce: bool = False
     updated_at: float = 0.0
 
     def render(self, template: str) -> str:
@@ -165,6 +171,20 @@ class PersonaStore:
     def rename(self, name: str, wake_pinyin_: str, wake_word: str | None = None) -> Persona:
         current = self.load()
         return self.save(replace(current, name=name, wake_word=wake_word or name, wake_pinyin=wake_pinyin_))
+
+    def set_avatar(self, appearance: str, spec: dict[str, Any], pack: dict[str, Any]) -> Persona:
+        """Record a look the device accepted; the next call announces it once."""
+        current = self.load()
+        return self.save(replace(current, appearance=appearance, avatar_spec=dict(spec), avatar_pack=dict(pack),
+                                 avatar_announce=True))
+
+    def take_avatar_announcement(self) -> str:
+        """The one-time 'I have a new look' note for the next voice session ('' when none)."""
+        current = self.load()
+        if not current.avatar_announce:
+            return ""
+        self.save(replace(current, avatar_announce=False))
+        return current.appearance
 
 
 _default_store: PersonaStore | None = None

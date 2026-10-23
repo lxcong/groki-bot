@@ -38,3 +38,5 @@ dist/
 
 # Name / wake word the user gave the assistant in a conversation (stackchan_mcp/persona.py)
 persona.json
+# Looks designed in a conversation and the assets images built for them (stackchan_mcp/avatar.py)
+avatars/

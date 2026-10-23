@@ -229,7 +229,15 @@ XIAOZHI_TOOLS = {
     "start_game",
     "stop_game",
     "rename_assistant",
+    "design_avatar",
+    "apply_avatar",
+    "discard_avatar_draft",
 }
+# design_avatar / apply_avatar / discard_avatar_draft are declared only where the workspace's avatar
+# generator and a packaged assets image exist (stackchan_mcp.avatar.available()).
+from stackchan_mcp import avatar as _avatar  # noqa: E402
+
+AVATAR_TOOLS = ["design_avatar", "apply_avatar", "discard_avatar_draft"] if _avatar.available() else []
 
 
 def test_tool_map_covers_voice_backend_tools():
@@ -262,7 +270,7 @@ def test_build_function_declarations_match_tool_map():
 
     decls = build_function_declarations()
     names = {decl.name for decl in decls}
-    assert names == set(TOOL_MAP) | MAC_TOOL_NAMES | {
+    assert names == (set(TOOL_MAP) - {"design_avatar", "apply_avatar", "discard_avatar_draft"} | set(AVATAR_TOOLS)) | MAC_TOOL_NAMES | {
         "express_emotion",
         "end_conversation",
         "ask_claude",
@@ -273,7 +281,7 @@ def test_build_function_declarations_match_tool_map():
 def test_build_function_declarations_includes_agent_tools():
     decls = build_function_declarations()
     names = [decl.name for decl in decls]
-    assert names[:14] == [
+    assert names[:14 + len(AVATAR_TOOLS)] == [
         "move_head",
         "set_avatar",
         "set_all_leds",
@@ -285,6 +293,7 @@ def test_build_function_declarations_includes_agent_tools():
         "start_game",
         "stop_game",
         "rename_assistant",
+        *AVATAR_TOOLS,
         "end_conversation",
         "ask_claude",
         "get_current_datetime",
@@ -373,7 +382,7 @@ def test_build_live_config_includes_system_instruction_and_tools():
     assert _modality_values(cfg.response_modalities) == ["AUDIO"]
     assert len(cfg.tools) == 2
     assert cfg.tools[0].google_search is not None
-    assert len(cfg.tools[1].function_declarations) == 25
+    assert len(cfg.tools[1].function_declarations) == 25 + len(AVATAR_TOOLS)
 
 
 def test_build_live_config_includes_google_search():
