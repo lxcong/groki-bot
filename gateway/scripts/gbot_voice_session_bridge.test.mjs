@@ -204,7 +204,7 @@ test('the same result from the box nudge and the transcript reply is relayed onc
 
 test('a new call takes over a stale active call that has no event stream, but not a live one', async () => {
   const port = await freePort(); const presences=[]; let reader;
-  const sandbox={callerAuthId:async()=> 'owner', presence:async(body)=>{presences.push([body.callId, body.isOnTheLine]);},
+  const sandbox={callerAuthId:async()=> 'owner', presence:async(body)=>{presences.push([body.callId, body.isOnTheLine]); if (body.callId==='call-old' && !body.isOnTheLine) throw new Error('upstream_http_404');},
     openEvents: async signal => new Response(new ReadableStream({start(controller) { signal.addEventListener('abort', () => controller.close(), {once:true}); }}), {headers:{'content-type':'text/event-stream'}})};
   const transcript={async *events(_context, signal) { await new Promise(resolve => signal.addEventListener('abort', resolve, {once:true})); }};
   const server=createBridge({port,agentId:'a',desktopEnabled:true,toolsEnabled:false,sandbox,transcript,rpc:async()=>({kind:1}),nativeLog:()=>{}});
@@ -214,7 +214,8 @@ test('a new call takes over a stale active call that has no event stream, but no
     assert.equal((await post('/native/presence',{agentId:'a',callId:'call-old',isOnTheLine:true,acceptsOverheard:false})).status,200);
     // Going off the line for a different call never touches the active one.
     assert.equal((await post('/native/presence',{agentId:'a',callId:'call-new',isOnTheLine:false,acceptsOverheard:false})).status,409);
-    // No event stream was ever attached to call-old: the owner is gone, so call-new takes over.
+    // No event stream was ever attached to call-old: the owner is gone, so call-new takes over,
+    // even though the box no longer knows call-old (its presence-off answers 404).
     assert.equal((await post('/native/presence',{agentId:'a',callId:'call-new',isOnTheLine:true,acceptsOverheard:false})).status,200);
     assert.deepEqual(presences,[['call-old',true],['call-old',false],['call-new',true]]);
     const tool={agentId:'a',callId:'call-new',name:'send_task',input:{request:'FAKE'},line:{theyJustTalked:false,newsOwed:false,receiptOwed:false,alreadySpokeThisTurn:false}};

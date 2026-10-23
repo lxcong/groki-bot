@@ -511,8 +511,11 @@ export function createBridge({ port = 18771, rpc = accountRpc, agentId = process
         try {
         const authId = await sandbox.callerAuthId();
         if (stale) {
-          logStream('box', 'stale_call_replaced', {http_status: null, error_class: null});
-          await sandbox.presence({agentId, callId: stale.callId, isOnTheLine: false, acceptsOverheard: false});
+          // The box may no longer know the stale call (404): that must not block the takeover.
+          let errorClass = null;
+          try { await sandbox.presence({agentId, callId: stale.callId, isOnTheLine: false, acceptsOverheard: false}); }
+          catch (error) { errorClass = /^upstream_http_\d{3}$/.test(error.message) ? error.message : 'error'; }
+          logStream('box', 'stale_call_replaced', {http_status: null, error_class: errorClass});
           activeCall = null; for (const controller of streams) controller.abort();
         }
         await sandbox.presence(body);
