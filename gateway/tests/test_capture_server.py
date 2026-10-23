@@ -146,3 +146,58 @@ def test_build_ota_response_is_deterministic_for_a_fixed_clock():
     payload = build_ota_response(device_version="2.5.3", websocket_url="ws://h:1/", now=1_760_000_000.5)
     assert payload["server_time"]["timestamp"] == 1_760_000_000_500
     assert payload["websocket"] == {"url": "ws://h:1/"}
+
+
+@pytest.mark.asyncio
+async def test_xiaozhi_ota_via_tunnel_omits_token_and_keeps_public_url():
+    """A request that came through Cloudflare never gets the shared secret."""
+    from stackchan_mcp.capture_server import create_capture_app, handle_xiaozhi_ota
+
+    app = create_capture_app(ota_ws_url="wss://xiaole.example.com/", ota_token="secret")
+    lan = await handle_xiaozhi_ota(FakeOtaRequest(app, headers={"Device-Id": "aa:bb"}))
+    assert json.loads(lan.text)["websocket"] == {"url": "wss://xiaole.example.com/", "token": "secret"}
+
+    tunnel = await handle_xiaozhi_ota(
+        FakeOtaRequest(
+            app,
+            host="xiaole.example.com",
+            headers={"Device-Id": "aa:bb", "CF-Connecting-IP": "203.0.113.9"},
+        )
+    )
+    assert json.loads(tunnel.text)["websocket"] == {"url": "wss://xiaole.example.com/"}
+
+
+@pytest.mark.asyncio
+async def test_xiaozhi_ota_device_allowlist():
+    from stackchan_mcp.capture_server import create_capture_app, handle_xiaozhi_ota, parse_device_ids
+
+    ids = parse_device_ids("7C:0C:5F:42:41:6C, aa:bb:cc:dd:ee:ff")
+    assert ids == {"7c:0c:5f:42:41:6c", "aa:bb:cc:dd:ee:ff"}
+    app = create_capture_app(ota_token="secret", device_ids=ids)
+
+    ok = await handle_xiaozhi_ota(FakeOtaRequest(app, headers={"Device-Id": "7c:0c:5f:42:41:6c"}))
+    assert ok.status == 200
+    unknown = await handle_xiaozhi_ota(FakeOtaRequest(app, headers={"Device-Id": "00:11:22:33:44:55"}))
+    assert unknown.status == 403
+    missing = await handle_xiaozhi_ota(FakeOtaRequest(app))
+    assert missing.status == 403
+
+
+@pytest.mark.asyncio
+async def test_tunnel_guard_hides_everything_but_ota():
+    """Through the tunnel only /xiaozhi/ota is reachable; on the LAN all routes work."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from stackchan_mcp.capture_server import create_capture_app
+
+    app = create_capture_app(ota_ws_url="wss://x.example/")
+    cf = {"CF-Connecting-IP": "203.0.113.9"}
+    async with TestClient(TestServer(app)) as client:
+        assert (await client.get("/debug/status")).status == 200
+        assert (await client.get("/debug/status", headers=cf)).status == 404
+        assert (await client.get("/debug/panel", headers=cf)).status == 404
+        assert (await client.post("/capture", headers=cf)).status == 404
+        assert (await client.post("/debug/inject-text", headers=cf)).status == 404
+        ota = await client.post("/xiaozhi/ota/", headers=cf, json={"application": {"version": "1.0"}})
+        assert ota.status == 200
+        assert (await ota.json())["websocket"] == {"url": "wss://x.example/"}

@@ -20,11 +20,21 @@ import websockets.exceptions
 from websockets.asyncio.server import ServerConnection
 
 from .audio_stream import SpeakResult, handle_audio_frame, speak_text
+from .capture_server import device_allowed, parse_device_ids
 from .cloud_proxy import CloudConnectionInfo, CloudProxy
 from .debug_status import DebugStatus, get_debug_status
 from .protocol import HelloResponse, make_mcp_message, parse_jsonrpc_response
 
 logger = logging.getLogger(__name__)
+
+
+def _REJECT_HEADERS() -> "websockets.datastructures.Headers":
+    """Headers for a refused handshake.
+
+    Without Content-Length the bare status line is forwarded by Cloudflare
+    Tunnel as a 502 instead of the real 401/403, which hides the cause.
+    """
+    return websockets.datastructures.Headers([("Content-Length", "0"), ("Connection", "close")])
 
 # Timeout for waiting for ESP32 responses
 RESPONSE_TIMEOUT = 300.0
@@ -463,12 +473,17 @@ class ESP32Manager:
 
         auth = request.headers.get("Authorization", "")
         if auth == f"Bearer {expected}":
-            return None
+            allowed = parse_device_ids(os.getenv("STACKCHAN_DEVICE_IDS", ""))
+            if device_allowed(request.headers, allowed):
+                return None
+            logger.warning(
+                "ESP32 auth rejected: device=%s not in STACKCHAN_DEVICE_IDS",
+                request.headers.get("Device-Id", "?"),
+            )
+            return websockets.http11.Response(403, "Forbidden", _REJECT_HEADERS())
 
         logger.warning("ESP32 auth rejected")
-        return websockets.http11.Response(
-            401, "Unauthorized", websockets.datastructures.Headers()
-        )
+        return websockets.http11.Response(401, "Unauthorized", _REJECT_HEADERS())
 
     async def _handler(self, ws: ServerConnection) -> None:
         """Handle an incoming ESP32 WebSocket connection.

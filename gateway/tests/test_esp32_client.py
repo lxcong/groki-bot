@@ -1129,3 +1129,25 @@ async def _complete_handshake(ws, tools=None):
         },
     }
     await ws.send(json.dumps(tools_resp))
+
+
+def test_check_auth_device_allowlist(monkeypatch):
+    """With STACKCHAN_DEVICE_IDS set, a valid token from an unknown device is refused."""
+    from stackchan_mcp.esp32_client import ESP32Manager
+
+    monkeypatch.setenv("STACKCHAN_TOKEN", "secret")
+    monkeypatch.setenv("STACKCHAN_DEVICE_IDS", "7c:0c:5f:42:41:6c")
+    server = ESP32Manager()
+
+    class Req:
+        def __init__(self, headers):
+            self.headers = headers
+
+    assert server._check_auth(None, Req({"Authorization": "Bearer secret", "Device-Id": "7C:0C:5F:42:41:6C"})) is None
+    bad_device = server._check_auth(None, Req({"Authorization": "Bearer secret", "Device-Id": "00:11:22:33:44:55"}))
+    assert bad_device is not None and bad_device.status_code == 403
+    bad_token = server._check_auth(None, Req({"Authorization": "Bearer nope", "Device-Id": "7c:0c:5f:42:41:6c"}))
+    assert bad_token is not None and bad_token.status_code == 401
+
+    monkeypatch.delenv("STACKCHAN_DEVICE_IDS")
+    assert server._check_auth(None, Req({"Authorization": "Bearer secret"})) is None

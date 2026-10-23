@@ -16,7 +16,7 @@ import time
 from aiohttp import web
 from aiohttp.web_log import AccessLogger
 
-from .capture_server import create_capture_app
+from .capture_server import create_capture_app, parse_device_ids
 from .avatar import DEVICE_GET_TOOL, avatar_dir
 from .cloud_proxy import CloudProxy, DEFAULT_CLOUD_URL
 from .device_emotion import IDLE_EMOTION, LISTENING_EMOTION, face_to_device_emotion
@@ -397,6 +397,7 @@ class Gateway:
             ota_ws_port=ws_port,
             ota_ws_url=os.getenv("STACKCHAN_OTA_WS_URL", ""),
             ota_token=os.getenv("STACKCHAN_TOKEN", ""),
+            device_ids=parse_device_ids(os.getenv("STACKCHAN_DEVICE_IDS", "")),
             avatar_dir=str(avatar_dir()),
         )
         app.router.add_post("/track", self._handle_track)

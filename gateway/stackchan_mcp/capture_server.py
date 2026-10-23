@@ -37,7 +37,12 @@ DEBUG_STATUS_KEY = web.AppKey("debug_status", DebugStatus)
 OTA_WS_PORT_KEY = web.AppKey("ota_ws_port", int)
 OTA_WS_URL_KEY = web.AppKey("ota_ws_url", str)
 OTA_TOKEN_KEY = web.AppKey("ota_token", str)
+OTA_DEVICE_IDS_KEY = web.AppKey("ota_device_ids", frozenset)
 AVATAR_DIR_KEY = web.AppKey("avatar_dir", str)
+
+# Paths a request that arrived through the public tunnel may reach. Everything
+# else on this server (photo upload, debug status, text injection) is LAN only.
+TUNNEL_ALLOWED_PATHS = frozenset({"/xiaozhi/ota", "/xiaozhi/ota/"})
 # Assets images (speech models + avatar pack) are named by their hash and carry
 # no secret, so the device may fetch them from outside too.
 TUNNEL_ALLOWED_PREFIXES = ("/xiaozhi/assets/", "/xiaozhi/avatars/")
@@ -60,6 +65,42 @@ def remember_ota_origin(request: web.Request) -> None:
     # Cloudflare adds CF-Connecting-IP to every request it forwards (see is_tunnel_request).
     via_tunnel = bool(request.headers.get("CF-Connecting-IP") or request.headers.get("Cf-Connecting-Ip"))
     _last_ota_origin["origin"] = f"{'https' if via_tunnel else 'http'}://{host}"
+
+
+def parse_device_ids(value: str) -> frozenset[str]:
+    """Normalise a comma/space separated list of device MACs (lower case)."""
+    return frozenset(
+        item.strip().lower() for item in value.replace(";", ",").replace(" ", ",").split(",") if item.strip()
+    )
+
+
+def is_tunnel_request(headers) -> bool:
+    """Whether the request came in through Cloudflare Tunnel.
+
+    cloudflared connects from loopback, so the peer address says nothing;
+    Cloudflare always adds ``CF-Connecting-IP`` with the real client address.
+    """
+    return bool(headers.get("CF-Connecting-IP") or headers.get("Cf-Connecting-Ip"))
+
+
+def device_allowed(headers, allowed: frozenset[str]) -> bool:
+    """True when no allowlist is set or the Device-Id header is in it."""
+    if not allowed:
+        return True
+    return headers.get("Device-Id", "").strip().lower() in allowed
+
+
+@web.middleware
+async def tunnel_guard(request: web.Request, handler):
+    """Hide every non-OTA endpoint from requests that arrived via the tunnel."""
+    if is_tunnel_request(request.headers) and request.path not in TUNNEL_ALLOWED_PATHS and not request.path.startswith(TUNNEL_ALLOWED_PREFIXES):
+        logger.warning(
+            "tunnel request to %s from %s refused",
+            request.path,
+            request.headers.get("CF-Connecting-IP", "?"),
+        )
+        return web.json_response({"error": "Not found"}, status=404)
+    return await handler(request)
 
 
 def _is_authorized(auth_header: str, expected_token: str) -> bool:
@@ -220,20 +261,31 @@ async def handle_xiaozhi_ota(request: web.Request) -> web.Response:
                 device_version = application["version"]
         except (json.JSONDecodeError, UnicodeDecodeError):
             device_version = None
+    if not device_allowed(request.headers, request.app.get(OTA_DEVICE_IDS_KEY, frozenset())):
+        logger.warning(
+            "xiaozhi OTA check from unknown device=%s refused",
+            request.headers.get("Device-Id", "?"),
+        )
+        return web.json_response({"error": "Forbidden"}, status=403)
     remember_ota_origin(request)
     websocket_url = request.app.get(OTA_WS_URL_KEY) or (
         f"ws://{_ota_host(request)}:{request.app.get(OTA_WS_PORT_KEY, 8765)}/"
     )
+    # The shared secret is handed out on the LAN only. A device that was
+    # provisioned at home keeps the token in NVS; a reply without ``token``
+    # leaves that stored value untouched (ota.cc only writes keys it receives).
+    via_tunnel = is_tunnel_request(request.headers)
     payload = build_ota_response(
         device_version=device_version,
         websocket_url=websocket_url,
-        token=request.app.get(OTA_TOKEN_KEY, ""),
+        token="" if via_tunnel else request.app.get(OTA_TOKEN_KEY, ""),
     )
     logger.info(
-        "xiaozhi OTA check from device=%s client=%s version=%s -> websocket %s",
+        "xiaozhi OTA check from device=%s client=%s version=%s via=%s -> websocket %s",
         request.headers.get("Device-Id", "?"),
         request.headers.get("Client-Id", "?"),
         device_version or "?",
+        "tunnel" if via_tunnel else "lan",
         websocket_url,
     )
     return web.json_response(payload)
@@ -276,6 +328,8 @@ async def handle_xiaozhi_avatar_sheet(request: web.Request) -> web.StreamRespons
     if not path.is_file():
         return web.json_response({"error": "Not found"}, status=404)
     return web.FileResponse(path, headers={"Content-Type": "image/png", "Cache-Control": "no-store"})
+
+
 def create_capture_app(
     capture_token: str = "",
     *,
@@ -284,10 +338,12 @@ def create_capture_app(
     ota_ws_port: int = 8765,
     ota_ws_url: str = "",
     ota_token: str = "",
+    device_ids: frozenset[str] | None = None,
     avatar_dir: str = "",
 ) -> web.Application:
     """Create the HTTP capture application."""
-    app = web.Application()
+    app = web.Application(middlewares=[tunnel_guard])
+    app[OTA_DEVICE_IDS_KEY] = frozenset(device_ids or ())
     app[AVATAR_DIR_KEY] = avatar_dir
     app[CAPTURE_TOKEN_KEY] = capture_token
     app[INJECT_TEXT_HANDLER_KEY] = inject_text_handler
