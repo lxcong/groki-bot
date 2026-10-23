@@ -56,9 +56,7 @@ mkfifo "${STDIN_FIFO}"
 KEEPER_PID=$!
 
 "${UV_BIN}" run \
-    --extra gemini-live \
-    --extra tts \
-    --extra wakeword \
+    --all-extras \
     --with python-socks \
     --with 'httpx[socks]' \
     python -m stackchan_mcp <"${STDIN_FIFO}" &
