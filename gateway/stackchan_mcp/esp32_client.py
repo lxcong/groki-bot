@@ -68,6 +68,7 @@ class ESP32Connection:
         # a connection built outside the hello handshake (as in tests)
         # keeps the historical "assume full MCP" behaviour.
         self.mcp_supported: bool = True
+        self.cloud_proxy: Any = None  # the voice session this connection runs
 
     @property
     def connected(self) -> bool:
@@ -549,11 +550,31 @@ class ESP32Manager:
                             connection.protocol_version,
                         )
 
+                    # Register connection. The gateway serves one voice session
+                    # at a time: a previous device's session is stopped first,
+                    # which also releases the Grok native call it holds, so the
+                    # new session can register its own call at once.
+                    async with self._lock:
+                        previous = self._connection
+                        if previous is not None and previous is not connection:
+                            if previous.connected:
+                                logger.warning("Replacing existing ESP32 connection")
+                            previous.disconnect()
+                            # The old handler's finally no longer owns _connection,
+                            # so release its device and local speaking sources now.
+                            self._debug_status.on_tts_state(False, source="device")
+                            self._debug_status.on_tts_state(False, source="local")
+                        self._connection = connection
+                        self._debug_status.on_device_connected(device_id)
+                    if previous is not None and previous is not connection:
+                        await self._stop_replaced_proxy(previous)
+
                     if cloud_proxy is not None:
                         cloud_info = CloudConnectionInfo.from_headers(request_headers)
                         # Lets the voice proxy end the conversation the way the
                         # xiaozhi cloud does: by closing the device's socket.
                         cloud_proxy.close_device = connection.close_ws
+                        connection.cloud_proxy = cloud_proxy
                         await cloud_proxy.start(cloud_info, data, ws.send)
 
                     # Send hello response only after the cloud socket has had a
@@ -563,19 +584,6 @@ class ESP32Manager:
                     # frames while the upstream cloud WebSocket is still opening.
                     resp = HelloResponse(session_id=session_id)
                     await ws.send(resp.model_dump_json())
-
-                    # Register connection
-                    async with self._lock:
-                        if self._connection is not None and self._connection is not connection:
-                            if self._connection.connected:
-                                logger.warning("Replacing existing ESP32 connection")
-                            self._connection.disconnect()
-                            # The old handler's finally no longer owns _connection,
-                            # so release its device and local speaking sources now.
-                            self._debug_status.on_tts_state(False, source="device")
-                            self._debug_status.on_tts_state(False, source="local")
-                        self._connection = connection
-                        self._debug_status.on_device_connected(device_id)
 
                     if mcp_supported:
                         # Start initialization as a separate task so the read
@@ -611,7 +619,8 @@ class ESP32Manager:
         except websockets.exceptions.ConnectionClosed:
             logger.info("ESP32 disconnected: device=%s", device_id)
         finally:
-            if cloud_proxy is not None:
+            if cloud_proxy is not None and connection.cloud_proxy is cloud_proxy:
+                connection.cloud_proxy = None
                 await cloud_proxy.stop()
             connection.disconnect()
             async with self._lock:
@@ -620,6 +629,23 @@ class ESP32Manager:
                     self._debug_status.on_device_disconnected()
                     self._debug_status.on_tts_state(False, source="local")
                     self._debug_status.on_tts_state(False, source="device")
+
+    async def _stop_replaced_proxy(self, previous: "ESP32Connection") -> None:
+        """Stop the voice session of a connection another device replaced.
+
+        Its handler only stops the session when its own socket closes; until
+        then it would keep the Grok native call, and the new device's session
+        would be refused with call_conflict.
+        """
+        proxy = getattr(previous, "cloud_proxy", None)
+        previous.cloud_proxy = None
+        if proxy is None:
+            return
+        try:
+            await asyncio.wait_for(proxy.stop(), 10)
+            logger.info("stopped the replaced device's voice session")
+        except Exception as exc:
+            logger.warning("stopping the replaced voice session failed: %s", exc)
 
     async def _init_device(self, connection: ESP32Connection, device_id: str) -> None:
         """Initialize MCP session with a newly connected device."""

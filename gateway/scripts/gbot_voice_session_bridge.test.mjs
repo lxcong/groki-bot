@@ -245,12 +245,12 @@ test('sandbox client waits for a waking box, reconnects after a 5xx and keeps th
     fetcher:async(url,options)=>{
       const path=new URL(url).pathname; paths.push([path, options.headers.authorization]);
       if (path==='/health' && healthFailures>0) { healthFailures--; return {ok:false,status:503,body:{cancel:async()=>{}}}; }
-      if (path==='/api/setVoiceCallPresence' && options.headers.authorization==='Bearer FAKE3') return {ok:false,status:502,body:{cancel:async()=>{}}};
+      if (path==='/api/setVoiceCallPresence' && options.headers.authorization==='Bearer FAKE3') return {ok:false,status:417,body:{cancel:async()=>{}}};
       return {ok:true,status:200,headers:new Headers({'content-type':'text/event-stream'}),body:{cancel:async()=>{}}};
     }});
   await client.presence({agentId:'a',callId:'c',isOnTheLine:true,acceptsOverheard:false});
   // two WAKING answers, then RUNNING; /health 503 once, then ok; the presence call itself got a 502
-  // on the first connection (token FAKE3) and succeeded after a reconnect (token FAKE4).
+  // on the first connection (token FAKE3, a 417 as the box answers while coming up) and succeeded after a reconnect (token FAKE4).
   assert.equal(rpcs.length,4);
   assert.deepEqual(paths.map(p=>p[0]),['/health','/health','/api/setVoiceCallPresence','/health','/api/setVoiceCallPresence']);
   assert.equal(paths.at(-1)[1],'Bearer FAKE4');

@@ -138,7 +138,8 @@ export class NativeSandboxClient {
         const health = await this.fetcher(connection.baseUrl + '/health', {redirect: 'error', headers: connection.headers, signal: AbortSignal.timeout(20000)});
         await health.body?.cancel();
         if (health.ok) break;
-        if (health.status < 500 || Date.now() >= deadline) throw new Error(`upstream_http_${health.status}`);
+        // A waking box has answered 417 and 503 before it is ready: keep polling until the deadline.
+        if (Date.now() >= deadline) throw new Error(`upstream_http_${health.status}`);
         if (!waited) this.log('box', 'waking', {http_status: health.status}); waited = true;
         await sleep(this.wakePollMs);
       }
@@ -151,8 +152,9 @@ export class NativeSandboxClient {
   async #fetch(path, options = {}, retried = false) {
     const connection = await this.#connect();
     const response = await this.fetcher(connection.baseUrl + path, {...options, redirect: 'error', headers: {...connection.headers, ...options.headers}});
-    if (response.status >= 500 && !retried) {
-      // The box restarted (new tokens) or went back to sleep: reconnect once.
+    if (!response.ok && !retried) {
+      // The box restarted (new tokens), went back to sleep (5xx) or answers 417
+      // while it comes up: drop the cached connection and reconnect once.
       await response.body?.cancel();
       this.log('box', 'reconnect', {http_status: response.status});
       this.reset();
@@ -374,7 +376,7 @@ function waitForNativeRetry(milliseconds, signal) {
 
 export function createBridge({ port = 18771, rpc = accountRpc, agentId = process.env.STACKCHAN_GBOT_VOICE_BOT_ID || process.env.STACKCHAN_GBOT_VOICE_AGENT_ID || process.env.STACKCHAN_TOOL_BOT_ID, toolsEnabled = process.env.STACKCHAN_GBOT_VOICE_TOOLS === '1', desktopEnabled = Boolean(process.env.STACKCHAN_TOOL_BOT?.trim()) || process.env.STACKCHAN_GBOT_VOICE_DESKTOP === '1', sandbox = new NativeSandboxClient({connectMode: 'normal'}), transcript = new NativeTranscriptClient(), nativeRetryDelayMs = 5000, nativeLog = event => console.log(JSON.stringify({event: 'gbot_native_stream', ...event})), sessionId = process.env.STACKCHAN_GBOT_VOICE_SESSION_ID || '' } = {}) {
   if (!Number.isFinite(nativeRetryDelayMs) || nativeRetryDelayMs < 10 || nativeRetryDelayMs > 30000) throw new Error('invalid_native_retry_delay');
-  const logStream = (source, state, extra = {}) => nativeLog({source, state, ...extra});
+  const logStream = (source, state, extra = {}) => nativeLog({ts: new Date().toISOString(), source, state, ...extra});
   let activeCall = null;
   let presenceBusy = false;
   const streams = new Set();
